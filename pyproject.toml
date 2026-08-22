@@ -1,24 +1,27 @@
 [build-system]
-requires = ["setuptools>=61.0.0"]
+requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "eiraos-chat-backend"
-version = "1.0.0"
-description = "Enterprise-grade AI, RAG, and Chat Backend for EiraOS"
+name = "eiraos"
+version = "0.1.0"
+description = "EiraOS Chat Backend with FastAPI, DDD, pgvector and AI Gateway"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
     "fastapi>=0.110.0",
-    "uvicorn>=0.28.0",
-    "sqlalchemy>=2.0.28",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy>=2.0.25",
     "asyncpg>=0.29.0",
-    "alembic>=1.13.1",
-    "pydantic>=2.6.4",
-    "pydantic-settings>=2.2.1",
-    "PyJWT>=2.8.0",
-    "httpx>=0.27.0",
     "pgvector>=0.2.4",
+    "alembic>=1.13.1",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "pyjwt>=2.8.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.9",
+    "httpx>=0.26.0",
     "structlog>=24.1.0",
     "prometheus-fastapi-instrumentator>=6.1.0",
     "arq>=0.25.0",
@@ -29,8 +32,9 @@ dependencies = [
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.5",
-    "httpx>=0.27.0"
+    "aiosqlite>=0.19.0"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["eiraos*"]
