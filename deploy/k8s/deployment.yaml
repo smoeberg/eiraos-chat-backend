@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eiraos-chat-backend
+  namespace: eiraos-production
+  labels:
+    app: eiraos-chat-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: eiraos-chat-backend
+  template:
+    metadata:
+      labels:
+        app: eiraos-chat-backend
+    spec:
+      containers:
+      - name: backend
+        image: ghcr.io/smoeberg/eiraos-chat-backend:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: eiraos-secrets
+              key: database-url
+        - name: REDIS_HOST
+          value: "redis-master"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: eiraos-secrets
+              key: jwt-secret-key
+        resources:
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
