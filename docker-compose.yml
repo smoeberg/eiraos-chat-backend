@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: eiraos
+      POSTGRES_PASSWORD: eirasecretpassword
+      POSTGRES_DB: eiraos_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://eiraos:eirasecretpassword@db:5432/eiraos_db
+      - SECRET_KEY=super-secret-production-key-change-me
+    depends_on:
+      - db
+    command: uvicorn eiraos.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:
