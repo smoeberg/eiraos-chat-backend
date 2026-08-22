@@ -1,6 +1,6 @@
-from fastapi import Request, Response, HTTPException, status
+from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-import time
+import uuid
 import structlog
 
 logger = structlog.get_logger()
@@ -16,25 +16,31 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 class TenantIsolationMiddleware(BaseHTTPMiddleware):
-    """
-    Enforces strict multi-tenant isolation by extracting organization_id 
-    from request headers (X-Organization-ID) or JWT claims and attaching it to request.state.
-    """
     async def dispatch(self, request: Request, call_next):
-        # Allow health checks and docs without tenant header
-        if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json", "/api/v1/auth/login"]:
+        if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json", "/metrics", "/api/v1/auth/login"]:
             return await call_next(request)
 
         org_id_header = request.headers.get("X-Organization-ID")
-        
         if org_id_header:
             try:
                 request.state.organization_id = int(org_id_header)
             except ValueError:
                 return Response(content='{"detail": "Invalid X-Organization-ID header format"}', status_code=400, media_type="application/json")
         else:
-            # Default or unassigned tenant context for restricted endpoints
             request.state.organization_id = None
 
         response = await call_next(request)
+        return response
+
+class RequestTracingMiddleware(BaseHTTPMiddleware):
+    """Injects a unique X-Request-ID into every request/response and binds it to structured logs."""
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        
+        # Bind request_id to structlog context
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
+        
+        response: Response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         return response
