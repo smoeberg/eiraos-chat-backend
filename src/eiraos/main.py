@@ -4,6 +4,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from eiraos.api.v1.router import api_router
 from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware
 from eiraos.core.logging import setup_logging
+from eiraos.core.exceptions import register_exception_handlers
 import structlog
 
 # Setup Structured JSON Logging
@@ -17,6 +18,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# 0. Register RFC 7807 Exception Handlers
+register_exception_handlers(app)
 
 # 1. Middlewares (Order matters: RequestTracing first, then Security, then Tenant)
 app.add_middleware(RequestTracingMiddleware)
