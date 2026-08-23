@@ -1,33 +1,35 @@
-"""Persistent, atomic idempotency service.
+"""Persistent, atomic idempotency service with lease fencing.
 
-State machine:
-
-    REQUEST
-       |
-       v
-  ATOMIC RESERVE  (INSERT … ON CONFLICT DO NOTHING / reclaim stale)
-       |
-       +-- completed  -> REPLAY cached response
-       +-- processing (lease valid) -> 409 Conflict (in-flight)
-       +-- processing (lease stale) -> RECLAIM -> EXECUTE
-       +-- new                      -> EXECUTE -> complete|fail
-
-Identity: (organization_id, user_id, key) with DB unique constraint.
+Completion only succeeds when lease_token still matches — prevents a stale
+worker from overwriting a reclaimed reservation's result.
 """
 from __future__ import annotations
 
 import hashlib
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Request, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from eiraos.domains.idempotency.models import IdempotencyRecord
 
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
-LEASE_SECONDS = 120  # max time a "processing" reservation is considered live
+LEASE_SECONDS = 120
+
+
+@dataclass(frozen=True)
+class IdempotencyOutcome:
+    status: str
+    lease_token: str | None = None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.status == other
+        return super().__eq__(other)
 
 
 def _body_digest(request: Request) -> str:
@@ -41,6 +43,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _new_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 async def _resolve_context(request: Request) -> tuple[int, int]:
     org_id = getattr(request.state, "organization_id", None)
     user_id = getattr(request.state, "user_id", None)
@@ -52,23 +66,28 @@ async def _resolve_context(request: Request) -> tuple[int, int]:
     return int(org_id), int(user_id)
 
 
-async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str:
-    """Atomically reserve the idempotency key.
+def resolve_idempotency_key(request: Request, body_key: str | None = None) -> str | None:
+    """Header is authoritative; body must match or is ignored if header set."""
+    header_key = (request.headers.get("Idempotency-Key") or "").strip() or None
+    body = (body_key or "").strip() or None
+    if header_key and body and header_key != body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key header and body field mismatch.",
+        )
+    return header_key or body
 
-    Returns:
-      - "processing"  -> caller should execute the side effect
-      - "completed"   -> caller should replay cached response
 
-    Raises:
-      - 409 if key reused with different payload, or another worker holds a live lease
-    """
+async def begin_idempotency(
+    db: AsyncSession, request: Request, key: str
+) -> IdempotencyOutcome:
     digest = _body_digest(request)
     org_id, user_id = await _resolve_context(request)
     now = _utcnow()
     expires_at = now + timedelta(seconds=DEFAULT_TTL_SECONDS)
     lease_until = now + timedelta(seconds=LEASE_SECONDS)
+    token = _new_token()
 
-    # 1) Try atomic insert (wins the race when key is absent)
     stmt = (
         pg_insert(IdempotencyRecord)
         .values(
@@ -80,6 +99,7 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str
             created_at=now,
             expires_at=expires_at,
             lease_until=lease_until,
+            lease_token=token,
         )
         .on_conflict_do_nothing(
             index_elements=["organization_id", "user_id", "key"]
@@ -90,9 +110,8 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str
     inserted_id = result.scalar_one_or_none()
     if inserted_id is not None:
         await db.commit()
-        return "processing"
+        return IdempotencyOutcome("processing", token)
 
-    # 2) Key already exists — load under row lock
     existing = (
         await db.execute(
             select(IdempotencyRecord)
@@ -116,10 +135,7 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str
             detail="Idempotency key was reused with a different payload.",
         )
 
-    # Expired completed records may be reclaimed
-    exp = existing.expires_at
-    if exp is not None and getattr(exp, "tzinfo", None) is None:
-        exp = exp.replace(tzinfo=timezone.utc)
+    exp = _as_utc(existing.expires_at)
     if existing.status == "completed" and exp is not None and exp < now:
         existing.status = "processing"
         existing.request_hash = digest
@@ -128,12 +144,13 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str
         existing.created_at = now
         existing.expires_at = expires_at
         existing.lease_until = lease_until
+        existing.lease_token = token
         await db.commit()
-        return "processing"
+        return IdempotencyOutcome("processing", token)
 
     if existing.status == "completed" and existing.response_reference:
         await db.commit()
-        return "completed"
+        return IdempotencyOutcome("completed", None)
 
     if existing.status == "failed":
         existing.status = "processing"
@@ -141,18 +158,17 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str) -> str
         existing.response_reference = None
         existing.lease_until = lease_until
         existing.expires_at = expires_at
+        existing.lease_token = token
         await db.commit()
-        return "processing"
+        return IdempotencyOutcome("processing", token)
 
-    # processing — check lease
-    lease = existing.lease_until
-    if lease is not None and getattr(lease, "tzinfo", None) is None:
-        lease = lease.replace(tzinfo=timezone.utc)
+    lease = _as_utc(existing.lease_until)
     if lease is not None and lease < now:
         existing.lease_until = lease_until
+        existing.lease_token = token
         existing.status = "processing"
         await db.commit()
-        return "processing"
+        return IdempotencyOutcome("processing", token)
 
     await db.commit()
     raise HTTPException(
@@ -167,7 +183,9 @@ async def complete_idempotency(
     key: str,
     response_status: int,
     response_reference: str,
-) -> None:
+    lease_token: str | None = None,
+) -> bool:
+    """Mark completed/failed. Returns False if fencing rejects this caller."""
     org_id, user_id = await _resolve_context(request)
     existing = (
         await db.execute(
@@ -181,12 +199,18 @@ async def complete_idempotency(
         )
     ).scalar_one_or_none()
     if existing is None:
-        return
+        return False
+
+    if lease_token is not None and existing.lease_token not in (None, lease_token):
+        await db.commit()
+        return False
+
     existing.status = "completed" if 200 <= response_status < 300 else "failed"
     existing.response_status = response_status
     existing.response_reference = response_reference
     existing.lease_until = None
     await db.commit()
+    return True
 
 
 async def read_cached_response(
@@ -206,11 +230,21 @@ async def read_cached_response(
     return existing.response_reference if existing else None
 
 
+async def cleanup_expired_records(db: AsyncSession, limit: int = 1000) -> int:
+    now = _utcnow()
+    result = await db.execute(
+        delete(IdempotencyRecord).where(
+            IdempotencyRecord.expires_at.is_not(None),
+            IdempotencyRecord.expires_at < now,
+            IdempotencyRecord.status.in_(["completed", "failed"]),
+        ).execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    return int(result.rowcount or 0)
+
+
 async def enforce_idempotency(request: Request):
-    key = request.headers.get("Idempotency-Key")
-    if not key:
-        return None
-    return key
+    return resolve_idempotency_key(request)
 
 
 async def record_idempotency(request: Request, response_data: dict):
