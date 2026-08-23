@@ -14,7 +14,7 @@ from eiraos.domains.agents.models import Bot
 from eiraos.domains.documents.rag_service import RAGService
 from eiraos.api.v1.documents import generate_embedding
 from eiraos.application.providers.factory import AIProviderFactory
-from eiraos.application.business_features import verify_answer, build_knowledge_system_context
+from eiraos.application.business_features import verify_answer, build_knowledge_system_context, VerificationResult, VERIFICATION_FAILED_BADGE
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
 
@@ -140,6 +140,15 @@ def _combined_system_prompt(bot_prompt: str | None, knowledge_context: str | Non
     return "\n\n".join(parts) if parts else None
 
 
+def _verification_failure(primary_answer: str, reason: str) -> VerificationResult:
+    return VerificationResult(
+        status="UNCERTAIN",
+        reason=reason,
+        answer=primary_answer + VERIFICATION_FAILED_BADGE,
+        verified=False,
+    )
+
+
 @router.post("/completions", dependencies=[Depends(require_permission("conversation:create"))])
 async def create_chat_completion(request: Request, payload: ChatCompletionRequest,
                                  current_user: dict = Depends(get_current_user),
@@ -190,10 +199,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             verification_status = None
             verification_reason = None
             if payload.verify:
-                verifier_bot = await _find_verifier_bot(db, bot, org_id)
-                verifier = await _provider_for_bot(verifier_bot, org_id)
-                result = await verify_answer(primary_answer=full_response, original_prompt=payload.prompt,
-                                             verifier=verifier, model=verifier_bot.model)
+                try:
+                    verifier_bot = await _find_verifier_bot(db, bot, org_id)
+                    verifier = await _provider_for_bot(verifier_bot, org_id)
+                    result = await verify_answer(primary_answer=full_response, original_prompt=payload.prompt,
+                                                 verifier=verifier, model=verifier_bot.model)
+                except Exception:
+                    result = _verification_failure(full_response, "Verifikationskontrollen kunne ikke gennemføres.")
                 full_response = result.answer
                 verified = result.verified
                 verification_status = result.status
@@ -201,12 +213,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             db.add(Message(conversation_id=conversation.id, role="assistant", content=full_response, bot_id=bot.id,
                            status="completed", ai_marked=True))
             await db.commit()
+            response_payload = {"role": "assistant", "content": full_response, "ai_marked": True,
+                                "verified": verified, "verification_status": verification_status,
+                                "verification_reason": verification_reason}
             if idem_key:
                 await idempotency.complete_idempotency(db, request, idem_key, status.HTTP_200_OK,
-                                                       json.dumps({"assistant": full_response}), lease_token=lease_token)
-            return {"role": "assistant", "content": full_response, "ai_marked": True,
-                    "verified": verified, "verification_status": verification_status,
-                    "verification_reason": verification_reason}
+                                                       json.dumps(response_payload), lease_token=lease_token)
+            return response_payload
         except HTTPException:
             raise
         except Exception:
@@ -248,10 +261,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             verification_status = None
             verification_reason = None
             if payload.verify:
-                verifier_bot = await _find_verifier_bot(db, bot, org_id)
-                verifier = await _provider_for_bot(verifier_bot, org_id)
-                result = await verify_answer(primary_answer=accumulated, original_prompt=payload.prompt,
-                                             verifier=verifier, model=verifier_bot.model)
+                try:
+                    verifier_bot = await _find_verifier_bot(db, bot, org_id)
+                    verifier = await _provider_for_bot(verifier_bot, org_id)
+                    result = await verify_answer(primary_answer=accumulated, original_prompt=payload.prompt,
+                                                 verifier=verifier, model=verifier_bot.model)
+                except Exception:
+                    result = _verification_failure(accumulated, "Verifikationskontrollen kunne ikke gennemføres.")
                 accumulated = result.answer
                 verified = result.verified
                 verification_status = result.status
@@ -260,8 +276,11 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
 
             await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "completed")
             if idem_key:
+                done_payload = {"role": "assistant", "content": accumulated, "ai_marked": True,
+                                "verified": verified, "verification_status": verification_status,
+                                "verification_reason": verification_reason}
                 await idempotency.complete_idempotency(db, request, idem_key, 200,
-                                                       json.dumps({"assistant": accumulated}), lease_token=lease_token)
+                                                       json.dumps(done_payload), lease_token=lease_token)
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified, 'verification_status': verification_status, 'verification_reason': verification_reason})}\n\n"
         except asyncio.CancelledError:
             try:
