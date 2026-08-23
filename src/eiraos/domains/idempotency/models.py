@@ -24,9 +24,9 @@ class IdempotencyRecord(Base):
     response_status = Column(Integer, nullable=True)
     response_reference = Column(Text, nullable=True)
     created_at = Column(
-        DateTime, default=datetime.utcnow,
+        DateTime(timezone=True), default=datetime.utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
     )
-    expires_at = Column(DateTime, nullable=True)
-    lease_until = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    lease_until = Column(DateTime(timezone=True), nullable=True)
     lease_token = Column(String(64), nullable=True)
