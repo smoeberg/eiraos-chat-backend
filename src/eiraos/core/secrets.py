@@ -58,7 +58,7 @@ class SecretService:
                     detail="This bot's credentials are not available cross-tenant.",
                 )
 
-        if secret_reference:
+        if secret_reference is not None:
             if not _SECRET_REFERENCE_RE.fullmatch(secret_reference):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
