@@ -18,14 +18,9 @@ from eiraos.api.v1.router import api_router
 from eiraos.api.v1.auth import get_current_user
 from eiraos.core.exceptions import EiraOSException
 from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware
+from eiraos.core.logging import setup_logging
 
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.add_log_level,
-        structlog.processors.JSONRenderer()
-    ]
-)
+setup_logging()          # single source of truth: JSON logging + PII/secret redaction
 logger = structlog.get_logger()
 
 app = FastAPI(
