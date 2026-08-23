@@ -236,3 +236,80 @@ async def test_stale_lease_allows_reclaim(session_factory):
     async with session_factory() as session:
         status = await begin_idempotency(session, req2, key)
     assert status.status == "processing"
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_lease_fences_stale_worker(session_factory):
+    """A stale owner cannot renew or complete after another worker reclaims its lease."""
+    from eiraos.core.idempotency import (
+        begin_idempotency,
+        complete_idempotency,
+        renew_idempotency_lease,
+    )
+
+    key = f"conc-{os.getpid()}-fencing"
+    body = b'{"fencing":true}'
+    org_id, user_id = 42, 11
+    await _clean_key(session_factory, org_id, user_id, key)
+
+    req_a = _make_request(body, org_id=org_id, user_id=user_id)
+    async with session_factory() as session:
+        outcome_a = await begin_idempotency(session, req_a, key)
+    assert outcome_a.status == "processing"
+    assert outcome_a.lease_token
+
+    # Force the first lease to expire, then let a second transaction reclaim it.
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE idempotency_records SET lease_until = NOW() - INTERVAL '5 minutes' "
+                "WHERE organization_id=:o AND user_id=:u AND key=:k"
+            ),
+            {"o": org_id, "u": user_id, "k": key},
+        )
+        await session.commit()
+
+    req_b = _make_request(body, org_id=org_id, user_id=user_id)
+    async with session_factory() as session:
+        outcome_b = await begin_idempotency(session, req_b, key)
+    assert outcome_b.status == "processing"
+    assert outcome_b.lease_token
+    assert outcome_b.lease_token != outcome_a.lease_token
+
+    async with session_factory() as session:
+        assert not await renew_idempotency_lease(
+            session, req_a, key, outcome_a.lease_token
+        )
+
+    async with session_factory() as session:
+        assert await renew_idempotency_lease(
+            session, req_b, key, outcome_b.lease_token
+        )
+
+    async with session_factory() as session:
+        assert not await complete_idempotency(
+            session, req_a, key, 200, '{"owner":"stale"}',
+            lease_token=outcome_a.lease_token,
+        )
+
+    async with session_factory() as session:
+        assert await complete_idempotency(
+            session, req_b, key, 200, '{"owner":"current"}',
+            lease_token=outcome_b.lease_token,
+        )
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT status, response_reference, lease_token "
+                    "FROM idempotency_records "
+                    "WHERE organization_id=:o AND user_id=:u AND key=:k"
+                ),
+                {"o": org_id, "u": user_id, "k": key},
+            )
+        ).first()
+    assert row is not None
+    assert row.status == "completed"
+    assert row.response_reference == '{"owner":"current"}'
+    assert row.lease_token == outcome_b.lease_token
