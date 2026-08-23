@@ -39,7 +39,6 @@ class DocumentIngestRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=MAX_TITLE_CHARS)
     content: str = Field(..., min_length=1, max_length=MAX_DOCUMENT_CHARS)
     metadata: Optional[Dict[str, Any]] = None
-    allow_sync_fallback: bool = False
 
 
 class DocumentSearchRequest(BaseModel):
@@ -133,7 +132,8 @@ async def ingest_document(
         content=payload.content,
     )
 
-    if job_id is None and payload.allow_sync_fallback:
+    # Sync fallback is server-side only (ALLOW_SYNC_INGEST_FALLBACK), never client-controlled.
+    if job_id is None and getattr(settings, "ALLOW_SYNC_INGEST_FALLBACK", False):
         doc.status = "processing"
         await db.commit()
         chunks = RAGService.intelligent_chunking(payload.content)
