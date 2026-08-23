@@ -82,6 +82,21 @@ def test_secret_service_prefers_reference_over_default(monkeypatch):
     assert SecretService.resolve(1, "special", None, caller_org_id=1) == "sk-special"
 
 
+def test_secret_is_resolved_but_not_exposed(monkeypatch):
+    secret = "TEST_PROVIDER_SECRET_123"
+    monkeypatch.setenv("EIRAOS_PROVIDER_TEST_KEY", secret)
+
+    resolved = SecretService.resolve(
+        bot_owner_org_id=1,
+        secret_reference="TEST_KEY",
+        platform_api_key=None,
+        credential_scope="organization",
+        caller_org_id=1,
+    )
+
+    assert resolved == secret
+
+
 # --- RBAC permission mapping ----------------------------------------------
 def test_owner_has_all_permissions():
     from eiraos.api.v1.auth import ROLE_PERMISSIONS
