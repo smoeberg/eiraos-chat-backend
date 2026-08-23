@@ -3,15 +3,18 @@ import asyncio
 from typing import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from eiraos.core.database import get_db
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.domains.agents.models import Bot
+from eiraos.domains.documents.rag_service import RAGService
+from eiraos.api.v1.documents import generate_embedding
 from eiraos.application.providers.factory import AIProviderFactory
+from eiraos.application.business_features import verify_answer, VERIFIED_BADGE, build_knowledge_system_context
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
 
@@ -21,15 +24,18 @@ SSE_HEARTBEAT_SECONDS = 15
 SSE_CHUNK_TIMEOUT_SECONDS = 30
 _CHARS_PER_TOKEN = 4
 DEFAULT_HISTORY_TOKEN_BUDGET = 8000
+MAX_KNOWLEDGE_SCOPE_CHARS = 120
 
 
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     conversation_id: int
     bot_id: int
-    prompt: str
+    prompt: str = Field(..., min_length=1)
     stream: bool = True
     idempotency_key: str | None = None
+    verify: bool = False
+    knowledge_scope: str | None = Field(default=None, max_length=MAX_KNOWLEDGE_SCOPE_CHARS)
 
 
 def _sanitize() -> str:
@@ -51,14 +57,14 @@ async def _build_messages(
     max_history: int = 40,
     history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET,
 ) -> list[dict]:
-    """Build messages with system prompt and a char/token history budget."""
+    """Build messages without filtering by bot, preserving cross-bot history."""
     stmt = (
         select(Message)
         .where(
             Message.conversation_id == conversation_id,
             Message.status.in_(["completed", "cancelled"]),
         )
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(max_history)
     )
     rows = list((await db.execute(stmt)).scalars().all())
@@ -95,9 +101,7 @@ async def _transition_assistant(
 ) -> None:
     """Update the streaming row in place; insert only if no row exists."""
     if asst_id is not None:
-        row = (
-            await db.execute(select(Message).where(Message.id == asst_id))
-        ).scalars().first()
+        row = (await db.execute(select(Message).where(Message.id == asst_id))).scalars().first()
         if row is not None:
             row.content = content
             row.status = status_value
@@ -122,6 +126,87 @@ def _bot_accessible(bot: Bot, org_id: int) -> bool:
     return Bot.visibility(bot) == "public"
 
 
+def _valid_knowledge_scope(value: str | None) -> str | None:
+    if value is None:
+        return None
+    scope = value.strip()
+    if not scope or scope in {".", ".."} or any(part in {".", ".."} for part in scope.split("/")):
+        raise HTTPException(status_code=422, detail="Invalid knowledge_scope")
+    return scope
+
+
+async def _find_verifier_bot(
+    db: AsyncSession,
+    primary_bot: Bot,
+    org_id: int,
+) -> Bot:
+    """Select another accessible/configured bot, otherwise use the primary bot."""
+    stmt = select(Bot).where(Bot.id != primary_bot.id).order_by(Bot.id.asc())
+    candidates = (await db.execute(stmt)).scalars().all()
+    for candidate in candidates:
+        if not _bot_accessible(candidate, org_id):
+            continue
+        if not candidate.provider or not candidate.model:
+            continue
+        try:
+            SecretService.resolve(
+                candidate.organization_id,
+                candidate.secret_reference,
+                None,
+                credential_scope=getattr(candidate, "credential_scope", "organization") or "organization",
+                caller_org_id=org_id,
+            )
+        except Exception:
+            continue
+        return candidate
+    return primary_bot
+
+
+async def _provider_for_bot(bot: Bot, org_id: int):
+    api_key = SecretService.resolve(
+        bot.organization_id,
+        bot.secret_reference,
+        None,
+        credential_scope=getattr(bot, "credential_scope", "organization") or "organization",
+        caller_org_id=org_id,
+    )
+    return AIProviderFactory.get_provider(bot.provider, api_key)
+
+
+async def _knowledge_context(
+    db: AsyncSession,
+    org_id: int,
+    prompt: str,
+    knowledge_scope: str | None,
+) -> str | None:
+    if not knowledge_scope:
+        return None
+    query_embedding = await generate_embedding(prompt)
+    results = await RAGService.hybrid_search(
+        db=db,
+        organization_id=org_id,
+        query_embedding=query_embedding,
+        query_text=prompt,
+        limit=6,
+        knowledge_scope="organization",
+    )
+    scoped = []
+    for result in results:
+        metadata = result.get("metadata")
+        try:
+            metadata_obj = json.loads(metadata) if isinstance(metadata, str) else (metadata or {})
+        except json.JSONDecodeError:
+            metadata_obj = {}
+        if metadata_obj.get("knowledge_scope") in (knowledge_scope, "organization"):
+            scoped.append(result)
+    return build_knowledge_system_context(scoped)
+
+
+def _combined_system_prompt(bot_prompt: str | None, knowledge_context: str | None) -> str | None:
+    parts = [p.strip() for p in (bot_prompt, knowledge_context) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
+
+
 @router.post("/completions", dependencies=[Depends(require_permission("conversation:create"))])
 async def create_chat_completion(
     request: Request,
@@ -144,9 +229,8 @@ async def create_chat_completion(
     if not bot or not _bot_accessible(bot, org_id):
         raise HTTPException(status_code=404, detail="Bot not found or access denied")
 
-    idem_key = idempotency.resolve_idempotency_key(
-        request, getattr(payload, "idempotency_key", None)
-    )
+    knowledge_scope = _valid_knowledge_scope(payload.knowledge_scope)
+    idem_key = idempotency.resolve_idempotency_key(request, getattr(payload, "idempotency_key", None))
     lease_token: str | None = None
     if idem_key:
         outcome = await idempotency.begin_idempotency(db, request, idem_key)
@@ -168,14 +252,12 @@ async def create_chat_completion(
     await db.commit()
 
     try:
-        api_key = SecretService.resolve(
-            bot.organization_id,
-            bot.secret_reference,
-            None,
-            credential_scope=getattr(bot, "credential_scope", "organization") or "organization",
-            caller_org_id=org_id,
+        provider = await _provider_for_bot(bot, org_id)
+        knowledge_context = await _knowledge_context(db, org_id, payload.prompt, knowledge_scope)
+        effective_system_prompt = _combined_system_prompt(bot.system_prompt, knowledge_context)
+        provider_messages = await _build_messages(
+            db, conversation.id, payload.prompt, effective_system_prompt
         )
-        provider = AIProviderFactory.get_provider(bot.provider, api_key)
     except HTTPException:
         raise
     except Exception:
@@ -184,34 +266,46 @@ async def create_chat_completion(
             detail="AI provider could not be initialized.",
         )
 
-    provider_messages = await _build_messages(
-        db, conversation.id, payload.prompt, bot.system_prompt
-    )
-
     if not payload.stream:
         try:
             full_response = await provider.generate_chat_completion(
                 model=bot.model,
                 messages=provider_messages,
-                system_prompt=bot.system_prompt,
+                system_prompt=effective_system_prompt,
             )
-            asst_msg = Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=full_response,
-                bot_id=bot.id,
-                status="completed",
-                ai_marked=True,
+            verified = False
+            if payload.verify:
+                verifier_bot = await _find_verifier_bot(db, bot, org_id)
+                verifier = await _provider_for_bot(verifier_bot, org_id)
+                full_response = await verify_answer(
+                    primary_answer=full_response,
+                    original_prompt=payload.prompt,
+                    verifier=verifier,
+                    model=verifier_bot.model,
+                )
+                verified = True
+            db.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=full_response,
+                    bot_id=bot.id,
+                    status="completed",
+                    ai_marked=True,
+                )
             )
-            db.add(asst_msg)
             await db.commit()
             if idem_key:
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_200_OK,
-                    json.dumps({"assistant": full_response}),
-                    lease_token=lease_token,
+                    json.dumps({"assistant": full_response}), lease_token=lease_token,
                 )
-            return {"role": "assistant", "content": full_response, "ai_marked": True}
+            return {
+                "role": "assistant",
+                "content": full_response,
+                "ai_marked": True,
+                "verified": verified,
+            }
         except HTTPException:
             raise
         except Exception:
@@ -247,7 +341,7 @@ async def create_chat_completion(
             stream = provider.stream_chat_completion(
                 model=bot.model,
                 messages=provider_messages,
-                system_prompt=bot.system_prompt,
+                system_prompt=effective_system_prompt,
             )
             try:
                 while True:
@@ -265,29 +359,37 @@ async def create_chat_completion(
             except asyncio.TimeoutError:
                 raise RuntimeError("provider stream timed out")
 
+            verified = False
+            if payload.verify:
+                verifier_bot = await _find_verifier_bot(db, bot, org_id)
+                verifier = await _provider_for_bot(verifier_bot, org_id)
+                accumulated = await verify_answer(
+                    primary_answer=accumulated,
+                    original_prompt=payload.prompt,
+                    verifier=verifier,
+                    model=verifier_bot.model,
+                )
+                verified = True
+                yield f"data: {json.dumps({'type': 'verified', 'badge': VERIFIED_BADGE})}\n\n"
+
             await _transition_assistant(
                 db, asst_id, conversation.id, bot.id, accumulated, "completed"
             )
             if idem_key:
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_200_OK,
-                    json.dumps({"assistant": accumulated}),
-                    lease_token=lease_token,
+                    json.dumps({"assistant": accumulated}), lease_token=lease_token,
                 )
-            yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified})}\n\n"
         except asyncio.CancelledError:
             try:
-                await _transition_assistant(
-                    db, asst_id, conversation.id, bot.id, accumulated, "cancelled"
-                )
+                await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "cancelled")
             except Exception:
                 pass
             raise
         except Exception:
             try:
-                await _transition_assistant(
-                    db, asst_id, conversation.id, bot.id, accumulated, "failed"
-                )
+                await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "failed")
             except Exception:
                 pass
             yield f"data: {json.dumps({'type': 'error', 'detail': _sanitize()})}\n\n"
