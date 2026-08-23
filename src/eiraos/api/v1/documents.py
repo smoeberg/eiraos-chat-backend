@@ -1,25 +1,33 @@
+"""RAG document ingest (async job) and hybrid search."""
+from __future__ import annotations
+
 from typing import List, Optional, Dict, Any
 import json
+
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import structlog
+import httpx
 
 from eiraos.core.database import get_db
-from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
-from eiraos.domains.documents.models import DocumentChunk
+from eiraos.api.v1.auth import (
+    get_current_user,
+    get_current_active_organization,
+    require_permission,
+)
+from eiraos.domains.documents.models import Document, DocumentChunk
 from eiraos.domains.documents.rag_service import RAGService
 from eiraos.core.config import settings
 from eiraos.core import idempotency
 from eiraos.core.exceptions import EiraOSException
-import httpx
+from eiraos.workers.client import enqueue_document_ingestion
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/documents", tags=["RAG & Documents"])
 
-# Hardening (Sprint 4): bounded payloads so RAG pipeline can't be abused by
-# unbounded content/uploads or runaway query/result sizes.
 MAX_DOCUMENT_CHARS = 200_000
 MAX_TITLE_CHARS = 500
 MAX_SEARCH_QUERY_CHARS = 2_000
@@ -31,19 +39,26 @@ class DocumentIngestRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=MAX_TITLE_CHARS)
     content: str = Field(..., min_length=1, max_length=MAX_DOCUMENT_CHARS)
     metadata: Optional[Dict[str, Any]] = None
+    allow_sync_fallback: bool = False
 
 
 class DocumentSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     query: str = Field(..., min_length=1, max_length=MAX_SEARCH_QUERY_CHARS)
     limit: int = Field(default=5, ge=1, le=MAX_SEARCH_LIMIT)
 
 
+class DocumentStatusResponse(BaseModel):
+    id: int
+    title: str
+    status: str
+    organization_id: int
+
+
 async def generate_embedding(text_content: str) -> List[float]:
-    """Returns an embedding vector; never surfaces upstream internals to callers."""
     if (
         not settings.OPENAI_API_KEY
-        or settings.OPENAI_API_KEY == "sk-placeholder"
-        or settings.OPENAI_API_KEY == "replace-me"
+        or settings.OPENAI_API_KEY in ("sk-placeholder", "replace-me")
     ):
         raise EiraOSException(
             title="Embedding not configured",
@@ -61,10 +76,8 @@ async def generate_embedding(text_content: str) -> List[float]:
                 json={"model": "text-embedding-ada-002", "input": text_content},
             )
         response.raise_for_status()
-        data = response.json()
-        return data["data"][0]["embedding"]
+        return response.json()["data"][0]["embedding"]
     except (httpx.HTTPError, KeyError, ValueError):
-        # Do not leak upstream body/details/exception text to the client.
         raise EiraOSException(
             title="Embedding failed",
             detail="The embedding provider could not process this request.",
@@ -72,7 +85,11 @@ async def generate_embedding(text_content: str) -> List[float]:
         )
 
 
-@router.post("/ingest", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_permission("document:upload"))])
+@router.post(
+    "/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_permission("document:upload"))],
+)
 async def ingest_document(
     payload: DocumentIngestRequest,
     request: Request,
@@ -80,73 +97,127 @@ async def ingest_document(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db),
 ):
-    # Idempotency: a client retrying the same ingest with the same key is not
-    # re-embedded (prevents duplicate chunks + avoidable provider cost).
-    idem_key = idempotency.enforce_idempotency(request)
-    try:
-        outcome = await idempotency.begin_idempotency(
-            db, request, f"doc:ingest:{idem_key}"
-        )
-    except HTTPException:
-        raise
-    if outcome == "completed":
-        return {"status": "duplicate", "chunks_stored": 0, "title": payload.title}
+    """Accept document, persist Document(status=queued), enqueue ARQ job."""
+    raw_key = request.headers.get("Idempotency-Key") or ""
+    idem_key = raw_key.strip() or None
+    ledger_key = f"doc:ingest:{idem_key}" if idem_key else None
 
-    chunks = RAGService.intelligent_chunking(payload.content)
-    stored_count = 0
-    failed_count = 0
+    if ledger_key:
+        outcome = await idempotency.begin_idempotency(db, request, ledger_key)
+        if outcome == "completed":
+            cached = await idempotency.read_cached_response(db, request, ledger_key)
+            if cached:
+                try:
+                    return json.loads(cached)
+                except json.JSONDecodeError:
+                    pass
+            return {"status": "duplicate", "document_id": None, "title": payload.title}
 
-    for chunk_text in chunks:
-        try:
-            embedding = await generate_embedding(chunk_text)
-        except EiraOSException:
-            failed_count += 1
-            logger.warning("embedding_chunk_rejected", org_id=org_id)
-            continue
-        except Exception as e:  # noqa: BLE001 - isolate per-chunk surprises
-            failed_count += 1
-            logger.warning(
-                "embedding_chunk_unexpected",
-                org_id=org_id,
-                error_type=type(e).__name__,
-            )
-            continue
-
-        chunk_db = DocumentChunk(
-            organization_id=org_id,
-            content=chunk_text,
-            embedding=embedding,
-            metadata_={"title": payload.title, **(payload.metadata or {})},
-        )
-        db.add(chunk_db)
-        stored_count += 1
-
+    doc = Document(
+        organization_id=org_id,
+        title=payload.title,
+        source=(payload.metadata or {}).get("source", "api"),
+        mime_type=(payload.metadata or {}).get("mime_type", "text/plain"),
+        status="queued",
+        owner=current_user["user_id"],
+    )
+    db.add(doc)
     await db.commit()
-    await idempotency.complete_idempotency(
-        db,
-        request,
-        f"doc:ingest:{idem_key}",
-        status.HTTP_201_CREATED,
-        json.dumps({"stored": stored_count, "failed": failed_count}),
+    await db.refresh(doc)
+
+    job_id = await enqueue_document_ingestion(
+        document_id=doc.id,
+        organization_id=org_id,
+        content=payload.content,
     )
 
-    if chunks and stored_count == 0:
-        # All chunks failed to embed: don't report a hollow success.
+    if job_id is None and payload.allow_sync_fallback:
+        doc.status = "processing"
+        await db.commit()
+        chunks = RAGService.intelligent_chunking(payload.content)
+        stored = 0
+        for i, chunk_text in enumerate(chunks):
+            try:
+                emb = await generate_embedding(chunk_text)
+            except Exception:
+                emb = None
+            db.add(
+                DocumentChunk(
+                    organization_id=org_id,
+                    document_id=doc.id,
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_=json.dumps({"order": i, "title": payload.title}, ensure_ascii=False),
+                )
+            )
+            stored += 1
+        doc.status = "ready" if stored else "failed"
+        await db.commit()
+        body = {
+            "status": doc.status,
+            "document_id": doc.id,
+            "job_id": None,
+            "mode": "sync_fallback",
+            "chunks_stored": stored,
+            "title": payload.title,
+        }
+    elif job_id is None:
+        doc.status = "failed"
+        await db.commit()
         raise EiraOSException(
-            title="Document indexing failed",
-            detail="No chunks could be embedded by the provider.",
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            title="Job queue unavailable",
+            detail="Document was accepted but the background worker queue is unreachable.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    else:
+        body = {
+            "status": "queued",
+            "document_id": doc.id,
+            "job_id": job_id,
+            "mode": "async",
+            "title": payload.title,
+        }
 
+    if ledger_key:
+        await idempotency.complete_idempotency(
+            db, request, ledger_key, status.HTTP_202_ACCEPTED, json.dumps(body)
+        )
+    return body
+
+
+@router.get(
+    "/{document_id}",
+    response_model=DocumentStatusResponse,
+    dependencies=[Depends(require_permission("document:read"))],
+)
+async def get_document_status(
+    document_id: int,
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db),
+):
+    doc = (
+        await db.execute(
+            select(Document).where(
+                Document.id == document_id,
+                Document.organization_id == org_id,
+            )
+        )
+    ).scalars().first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
     return {
-        "status": "success" if failed_count == 0 else "partial",
-        "chunks_stored": stored_count,
-        "chunks_failed": failed_count,
-        "title": payload.title,
+        "id": doc.id,
+        "title": doc.title,
+        "status": doc.status,
+        "organization_id": doc.organization_id,
     }
 
 
-@router.post("/search", dependencies=[Depends(require_permission("document:read"))])
+@router.post(
+    "/search",
+    dependencies=[Depends(require_permission("document:read"))],
+)
 async def search_documents(
     payload: DocumentSearchRequest,
     current_user: dict = Depends(get_current_user),
