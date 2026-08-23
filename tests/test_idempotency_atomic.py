@@ -103,3 +103,20 @@ def test_worker_sets_processing_and_ready():
     src = inspect.getsource(tasks.process_document_ingestion)
     assert 'doc.status = "processing"' in src
     assert "intelligent_chunking" in src
+
+
+@pytest.mark.asyncio
+async def test_idempotency_record_does_not_store_secrets():
+    secret = "TEST_SUPER_SECRET_KEY_999"
+    from eiraos.domains.idempotency.models import IdempotencyRecord
+    record = IdempotencyRecord(
+        organization_id=1,
+        user_id=1,
+        key="test-key",
+        request_hash="abc",
+        status="completed",
+        response_reference='{"status":"ok"}',
+    )
+    assert secret not in (record.response_reference or "")
+
+
