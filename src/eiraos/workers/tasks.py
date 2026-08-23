@@ -36,7 +36,7 @@ async def _embed(text_content: str) -> list[float] | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await httpx.AsyncClient(timeout=30.0).post(
+            resp = await client.post(
                 "https://api.openai.com/v1/embeddings",
                 headers={
                     "Authorization": f"Bearer {key}",
@@ -46,8 +46,8 @@ async def _embed(text_content: str) -> list[float] | None:
             )
             resp.raise_for_status()
             return resp.json()["data"][0]["embedding"]
-    except Exception as e:
-        logger.warning("worker_embed_failed", error_type=type(e).__name__)
+    except Exception:
+        logger.warning("worker_embed_failed", error_type="provider_error")
         return None
 
 
@@ -57,73 +57,46 @@ async def process_document_ingestion(
 ):
     """Document lifecycle: queued -> processing -> ready | failed."""
     logger.info("document_ingestion_start", document_id=document_id, org_id=organization_id)
-
     async with async_session_maker() as session:
         doc = await session.get(Document, document_id)
         if doc is None:
             logger.warning("worker_document_not_found", document_id=document_id)
             return {"status": "not_found", "document_id": document_id}
-
         doc.status = "processing"
         await session.commit()
-
         try:
             chunks = RAGService.intelligent_chunking(content, chunk_size=500, overlap=50)
             created = 0
             embedded = 0
             for position, chunk_text in enumerate(chunks):
                 emb = await _embed(chunk_text)
-                meta = json.dumps(
-                    {
-                        "order": position,
-                        "title": doc.title,
-                        "knowledge_scope": knowledge_scope,
-                    },
-                    ensure_ascii=False,
-                )
-                session.add(
-                    DocumentChunk(
-                        organization_id=organization_id,
-                        document_id=document_id,
-                        content=chunk_text,
-                        embedding=emb,
-                        metadata_=meta,
-                    )
-                )
+                meta = json.dumps({
+                    "order": position,
+                    "title": doc.title,
+                    "knowledge_scope": knowledge_scope,
+                }, ensure_ascii=False)
+                session.add(DocumentChunk(
+                    organization_id=organization_id,
+                    document_id=document_id,
+                    content=chunk_text,
+                    embedding=emb,
+                    metadata_=meta,
+                ))
                 created += 1
                 if emb is not None:
                     embedded += 1
-
             doc.status = "ready" if created > 0 else "failed"
             await session.commit()
-            logger.info(
-                "document_ingestion_complete",
-                document_id=document_id,
-                chunks=created,
-                embedded=embedded,
-                status=doc.status,
-            )
-            return {
-                "status": doc.status,
-                "document_id": document_id,
-                "chunks": created,
-                "embedded": embedded,
-            }
+            return {"status": doc.status, "document_id": document_id, "chunks": created, "embedded": embedded}
         except Exception as e:
-            logger.exception("document_ingestion_failed", document_id=document_id, error=str(e))
+            logger.exception("document_ingestion_failed", document_id=document_id, error_type=type(e).__name__)
             doc.status = "failed"
             await session.commit()
-            return {
-                "status": "failed",
-                "document_id": document_id,
-                "error_type": type(e).__name__,
-            }
+            return {"status": "failed", "document_id": document_id, "error_type": type(e).__name__}
 
 
 async def cleanup_expired_idempotency(ctx):
-    """Periodic retention: delete expired completed/failed idempotency rows."""
     from eiraos.core.idempotency import cleanup_expired_records
-
     async with async_session_maker() as session:
         deleted = await cleanup_expired_records(session, limit=2000)
     logger.info("idempotency_cleanup", deleted=deleted)
