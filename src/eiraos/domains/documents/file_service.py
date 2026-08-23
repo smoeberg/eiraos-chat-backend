@@ -1,7 +1,7 @@
 """Secure file parsing/storage helpers for document ingestion."""
 from __future__ import annotations
 
-import re
+import os
 import uuid
 from pathlib import Path
 from typing import BinaryIO
@@ -26,9 +26,8 @@ def validate_upload(filename: str, size: int) -> str:
 def extract_text(data: bytes, extension: str) -> str:
     if extension == ".pdf":
         try:
-            from pypdf import PdfReader
             from io import BytesIO
-
+            from pypdf import PdfReader
             reader = PdfReader(BytesIO(data))
             text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
         except Exception as exc:
@@ -45,19 +44,26 @@ def extract_text(data: bytes, extension: str) -> str:
 
 
 def storage_path(root: Path, organization_id: int, extension: str) -> tuple[Path, str]:
-    """Create an opaque, tenant-scoped filename; never use the client filename."""
     relative = Path(str(organization_id)) / f"{uuid.uuid4().hex}{extension}"
     root_resolved = root.resolve()
     target = (root_resolved / relative).resolve()
     if root_resolved != target and root_resolved not in target.parents:
         raise ValueError("Invalid storage path")
     target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(target.parent, 0o700)
+    except OSError:
+        pass
     return target, relative.as_posix()
 
 
 def write_upload(stream: BinaryIO, target: Path) -> int:
     total = 0
     with target.open("xb") as handle:
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
         while True:
             chunk = stream.read(1024 * 1024)
             if not chunk:
