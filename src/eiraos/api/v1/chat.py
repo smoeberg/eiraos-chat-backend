@@ -14,19 +14,15 @@ from eiraos.domains.agents.models import Bot
 from eiraos.application.providers.factory import AIProviderFactory
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
-from eiraos.core.exceptions import EiraOSException
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 
-# Heartbeat keeps proxies from closing idle SSE connections.
 SSE_HEARTBEAT_SECONDS = 15
-# If the provider produces no token within this window, treat the stream as dead.
 SSE_CHUNK_TIMEOUT_SECONDS = 30
 
 
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     conversation_id: int
     bot_id: int
     prompt: str
@@ -35,23 +31,45 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _sanitize() -> str:
-    """Return a generic, non-informative error string for clients."""
     return "An unexpected error occurred while processing your request."
 
 
 async def _next_chunk(stream, timeout: float):
-    """Awaits one chunk from an async iterator with a timeout; None on drain."""
     try:
         return await asyncio.wait_for(stream.__anext__(), timeout=timeout)
     except StopAsyncIteration:
         return None
 
 
-def _bot_accessible(bot: Bot, org_id: int) -> bool:
-    """A bot is reachable if it belongs to the caller's org or is public.
+async def _build_messages(
+    db: AsyncSession,
+    conversation_id: int,
+    current_prompt: str,
+    system_prompt: str | None,
+    max_history: int = 20,
+) -> list[dict]:
+    """Build provider messages: recent history + current user turn."""
+    stmt = (
+        select(Message)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.status.in_(["completed", "interrupted"]),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(max_history)
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    rows.reverse()
+    messages: list[dict] = []
+    for m in rows:
+        if m.role in ("user", "assistant", "system") and m.content:
+            messages.append({"role": m.role, "content": m.content})
+    if not messages or messages[-1].get("content") != current_prompt:
+        messages.append({"role": "user", "content": current_prompt})
+    return messages
 
-    Uses Bot.visibility (single source of truth) rather than the legacy boolean.
-    """
+
+def _bot_accessible(bot: Bot, org_id: int) -> bool:
     if bot.organization_id is not None and bot.organization_id == org_id:
         return True
     return Bot.visibility(bot) == "public"
@@ -79,13 +97,11 @@ async def create_chat_completion(
     if not bot or not _bot_accessible(bot, org_id):
         raise HTTPException(status_code=404, detail="Bot not found or access denied")
 
-    # Idempotency: replaying a request with the same Idempotency-Key header
-    # returns the cached result instead of re-invoking the (paid) provider.
     idem_key = (payload.idempotency_key or "").strip() or None
     if idem_key:
         begin_status = await idempotency.begin_idempotency(db, request, idem_key)
         if begin_status == "completed":
-            cached = await idempotency.read_cached_response(request, idem_key)
+            cached = await idempotency.read_cached_response(db, request, idem_key)
             if cached is not None:
                 return json.loads(cached)
 
@@ -100,9 +116,14 @@ async def create_chat_completion(
     db.add(user_msg)
     await db.commit()
 
-    # Resolve provider credential (fail-closed, never leaks a secret).
     try:
-        api_key = SecretService.resolve(bot.organization_id, bot.secret_reference, None)
+        api_key = SecretService.resolve(
+            bot.organization_id,
+            bot.secret_reference,
+            None,
+            credential_scope=getattr(bot, "credential_scope", "organization") or "organization",
+            caller_org_id=org_id,
+        )
         provider = AIProviderFactory.get_provider(bot.provider, api_key)
     except HTTPException:
         raise
@@ -112,11 +133,15 @@ async def create_chat_completion(
             detail="AI provider could not be initialized.",
         )
 
+    provider_messages = await _build_messages(
+        db, conversation.id, payload.prompt, bot.system_prompt
+    )
+
     if not payload.stream:
         try:
             full_response = await provider.generate_chat_completion(
                 model=bot.model,
-                messages=[{"role": "user", "content": payload.prompt}],
+                messages=provider_messages,
                 system_prompt=bot.system_prompt,
             )
             asst_msg = Message(
@@ -147,50 +172,57 @@ async def create_chat_completion(
                 detail="AI provider could not fulfil the request.",
             )
 
-    # ---- streaming SSE with message lifecycle + heartbeat + timeout + disconnect handling ----
     async def event_generator() -> AsyncIterator[str]:
         accumulated = ""
         last_heartbeat = asyncio.get_event_loop().time()
+        asst_id = None
         try:
-            yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id})}\n\n"
+            pending = Message(
+                conversation_id=conversation.id,
+                role="assistant",
+                content="",
+                bot_id=bot.id,
+                status="streaming",
+                ai_marked=True,
+            )
+            db.add(pending)
+            await db.commit()
+            await db.refresh(pending)
+            asst_id = pending.id
+
+            yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
             stream = provider.stream_chat_completion(
                 model=bot.model,
-                messages=[{"role": "user", "content": payload.prompt}],
+                messages=provider_messages,
                 system_prompt=bot.system_prompt,
             )
             try:
-                # Draining the provider stream with a per-chunk timeout so a silent
-                # upstream stall fails the stream cleanly instead of hanging forever.
                 while True:
                     chunk = await _next_chunk(stream, SSE_CHUNK_TIMEOUT_SECONDS)
                     if chunk is None:
-                        break  # provider legitimately finished
+                        break
                     accumulated += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
-                    # Emit a heartbeat if the client has not been written to recently.
                     now = asyncio.get_event_loop().time()
                     if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
                         yield ": keep-alive\n\n"
                         last_heartbeat = now
             except asyncio.TimeoutError:
-                # No provider output for the full window: fail the stream explicitly.
                 raise RuntimeError("provider stream timed out")
 
-            # Save completed assistant message
-            asst = Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=accumulated,
-                bot_id=bot.id,
-                status="completed",
-                ai_marked=True,
-            )
-            db.add(asst)
-            await db.commit()
+            if asst_id is not None:
+                row = (await db.execute(select(Message).where(Message.id == asst_id))).scalars().first()
+                if row:
+                    row.content = accumulated
+                    row.status = "completed"
+                    await db.commit()
+            if idem_key:
+                await idempotency.complete_idempotency(
+                    db, request, idem_key, status.HTTP_200_OK,
+                    json.dumps({"assistant": accumulated}),
+                )
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated})}\n\n"
         except asyncio.CancelledError:
-            # Client disconnected mid-stream: persist the partial transcript so
-            # nothing is silently lost, then stop generating cleanly.
             try:
                 interrupted = Message(
                     conversation_id=conversation.id,
@@ -206,7 +238,6 @@ async def create_chat_completion(
                 pass
             raise
         except Exception:
-            # Persist a failed assistant message rather than silently dropping it.
             try:
                 failed = Message(
                     conversation_id=conversation.id,
