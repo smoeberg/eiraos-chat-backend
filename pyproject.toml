@@ -20,6 +20,7 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     "pyjwt>=2.8.0",
     "passlib[bcrypt]>=1.7.4",
+    "bcrypt==4.0.1",
     "python-multipart>=0.0.9",
     "httpx>=0.26.0",
     "structlog>=24.1.0",
