@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,12 +62,20 @@ async def create_conversation(
 async def list_conversations(
     current_user: dict = Depends(get_current_user),
     org_id: int = Depends(get_current_active_organization),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db)
 ):
-    stmt = select(Conversation).where(
-        Conversation.organization_id == org_id,
-        Conversation.user_id == current_user["user_id"]
-    ).order_by(desc(Conversation.updated_at))
+    stmt = (
+        select(Conversation)
+        .where(
+            Conversation.organization_id == org_id,
+            Conversation.user_id == current_user["user_id"]
+        )
+        .order_by(desc(Conversation.updated_at))
+        .limit(limit)
+        .offset(offset)
+    )
     result = await db.execute(stmt)
     conversations = result.scalars().all()
     return [{
@@ -82,6 +90,8 @@ async def list_conversations(
 @router.get("/{conversation_id}/messages", response_model=List[MessageResponse])
 async def get_conversation_messages(
     conversation_id: int,
+    limit: int = Query(200, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
@@ -95,7 +105,13 @@ async def get_conversation_messages(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    msg_stmt = select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.asc())
+    msg_stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .limit(limit)
+        .offset(offset)
+    )
     msg_res = await db.execute(msg_stmt)
     messages = msg_res.scalars().all()
 
