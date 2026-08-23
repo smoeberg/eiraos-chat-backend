@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+import asyncio
+import uuid
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -17,6 +19,10 @@ router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+
+# JWT issuer/audience for strict claim validation.
+TOKEN_ISSUER = "eiraos"
+TOKEN_AUDIENCE = "eiraos-api"
 
 ROLE_PERMISSIONS = {
     "owner": [
@@ -72,8 +78,16 @@ def get_password_hash(password: str) -> str:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
+    now = datetime.utcnow()
+    expire = now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({
+        "exp": expire,
+        "iat": now,
+        "jti": uuid.uuid4().hex,
+        "iss": TOKEN_ISSUER,
+        "aud": TOKEN_AUDIENCE,
+        "token_version": to_encode.get("token_version", 1),
+    })
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -131,18 +145,28 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
         "sub": user.email,
         "user_id": user.id,
         "role": membership.role,
-        "organization_id": membership.organization_id
+        "organization_id": membership.organization_id,
+        "token_version": user.token_version
     })
     return {"access_token": access_token, "token_type": "bearer"}
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    request: Request = None,
+) -> dict:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            issuer=TOKEN_ISSUER,
+            audience=TOKEN_AUDIENCE,
+        )
         email: str = payload.get("sub")
         user_id: int = payload.get("user_id")
         role: str = payload.get("role", "member")
@@ -150,13 +174,26 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
         if not email or not user_id or not org_id:
             raise credentials_exception
-        return {"email": email, "user_id": user_id, "role": role, "organization_id": org_id}
+
+        ctx = {
+            "email": email,
+            "user_id": user_id,
+            "role": role,
+            "organization_id": org_id,
+            "jti": payload.get("jti"),
+            "token_version": payload.get("token_version", 1),
+        }
+        if request is not None:
+            request.state.organization_id = org_id
+            request.state.user_id = user_id
+        return ctx
     except jwt.PyJWTError:
         raise credentials_exception
 
 async def get_current_active_organization(
     current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ) -> int:
     org_id = current_user.get("organization_id")
     user_id = current_user.get("user_id")
@@ -166,7 +203,7 @@ async def get_current_active_organization(
 
     stmt = select(OrganizationMember).where(
         OrganizationMember.user_id == user_id,
-        OrganizationMember.organization_id == org_id
+        OrganizationMember.organization_id == org_id,
     )
     res = await db.execute(stmt)
     membership = res.scalars().first()
@@ -174,6 +211,17 @@ async def get_current_active_organization(
     if not membership:
         raise HTTPException(status_code=403, detail="User is not a member of this organization")
 
+    # Ensure a revoked token_version is rejected at request time.
+    async def _load_user_version():
+        u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        return u.token_version if u else None
+    db_version = await _load_user_version()
+    if db_version is not None and current_user.get("token_version") != db_version:
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+
+    if request is not None:
+        request.state.organization_id = org_id
+        request.state.user_id = user_id
     return org_id
 
 def require_permission(required_permission: str):

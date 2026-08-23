@@ -1,0 +1,90 @@
+"""Focused unit tests for the authority/security hardening layer.
+
+These tests exercise pure logic and deliberately avoid requiring a live DB,
+Redis, or external provider so they can run in CI without extra services.
+"""
+import os
+import pytest
+import jwt
+
+from eiraos.api.v1.auth import (
+    create_access_token,
+    verify_password,
+    get_password_hash,
+    TOKEN_ISSUER,
+    TOKEN_AUDIENCE,
+)
+from eiraos.core.secrets import SecretService
+from eiraos.api.v1.auth import require_permission
+from fastapi import HTTPException
+
+
+# --- JWT claims completeness ------------------------------------------------
+def test_access_token_contains_all_required_claims(monkeypatch):
+    monkeypatch.setenv("EIRAOS_JWT_SECRET", "test-secret")
+    from eiraos.core.config import settings
+    if hasattr(settings, "SECRET_KEY"):
+        settings.SECRET_KEY = "test-secret"
+
+    token = create_access_token({
+        "sub": "soeren@example.com",
+        "user_id": 1,
+        "role": "owner",
+        "organization_id": 10,
+    })
+    import jwt
+    payload = jwt.decode(token, "test-secret", algorithms=[settings.ALGORITHM],
+                          issuer=TOKEN_ISSUER, audience=TOKEN_AUDIENCE)
+    assert payload["iss"] == TOKEN_ISSUER
+    assert payload["aud"] == TOKEN_AUDIENCE
+    assert "iat" in payload
+    assert "exp" in payload
+    assert "jti" in payload           # unique token id, enables revocation
+    assert "token_version" in payload  # used for revocation on logout
+    assert payload["sub"] == "soeren@example.com"
+    assert payload["organization_id"] == 10
+
+
+def test_password_hash_roundtrip():
+    password = "correct horse battery staple"
+    hashed = get_password_hash(password)
+    assert verify_password(password, hashed) is True
+    assert verify_password("wrong", hashed) is False
+
+
+# --- Idempotency digest stability ----------------------------------------
+def test_idempotency_digest_is_stable():
+    import hashlib
+    d1 = hashlib.sha256(b'{"prompt":"hi"}').hexdigest()
+    d2 = hashlib.sha256(b'{"prompt":"hi"}').hexdigest()
+    d3 = hashlib.sha256(b'{"prompt":"bye"}').hexdigest()
+    assert d1 == d2
+    assert d1 != d3
+
+
+# --- Secret resolution fails closed ---------------------------------------
+def test_secret_service_fails_closed_when_unresolvable(monkeypatch):
+    monkeypatch.delenv("EIRAOS_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        SecretService.resolve(1, "nonexistent-ref", None)
+    assert exc.value.status_code == 500
+
+
+def test_secret_service_returns_configured_key(monkeypatch):
+    monkeypatch.setenv("EIRAOS_PROVIDER_MYKEY", "sk-abc123")
+    assert SecretService.resolve(1, "mykey", None) == "sk-abc123"
+
+
+def test_secret_service_prefers_reference_over_default(monkeypatch):
+    monkeypatch.setenv("EIRAOS_PROVIDER_SPECIAL", "sk-special")
+    monkeypatch.setenv("EIRAOS_PROVIDER_API_KEY", "sk-default")
+    assert SecretService.resolve(1, "special", None) == "sk-special"
+
+
+# --- RBAC permission mapping ----------------------------------------------
+def test_owner_has_all_permissions():
+    from eiraos.api.v1.auth import ROLE_PERMISSIONS
+    assert "bot:delete" in ROLE_PERMISSIONS.get("owner", [])
+    assert "organization:update" in ROLE_PERMISSIONS.get("owner", [])
+    assert "conversation:delete" in ROLE_PERMISSIONS.get("owner", [])

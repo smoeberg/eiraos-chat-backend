@@ -1,7 +1,8 @@
-from fastapi import Request, status
+from fastapi import Request, status, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy.exc import SQLAlchemyError
+from slowapi.errors import RateLimitExceeded
 import structlog
 
 logger = structlog.get_logger()
@@ -26,6 +27,35 @@ def register_exception_handlers(app):
                 "title": exc.title,
                 "status": exc.status_code,
                 "detail": exc.detail,
+                "instance": request.url.path
+            }
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        logger.warning("HTTP Exception", status_code=exc.status_code, detail=exc.detail, path=request.url.path)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "type": f"https://api.eiraos.ai/errors/{exc.status_code}",
+                "title": "HTTP Error",
+                "status": exc.status_code,
+                "detail": str(exc.detail),
+                "instance": request.url.path
+            }
+        )
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        logger.warning("Rate limit exceeded", path=request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": "60"},
+            content={
+                "type": "https://api.eiraos.ai/errors/429",
+                "title": "Too Many Requests",
+                "status": 429,
+                "detail": "Rate limit exceeded. Please retry after a short pause.",
                 "instance": request.url.path
             }
         )
