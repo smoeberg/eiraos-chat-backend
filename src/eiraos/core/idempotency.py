@@ -67,7 +67,6 @@ async def _resolve_context(request: Request) -> tuple[int, int]:
 
 
 def resolve_idempotency_key(request: Request, body_key: str | None = None) -> str | None:
-    """Header is authoritative; body must match or is ignored if header set."""
     header_key = (request.headers.get("Idempotency-Key") or "").strip() or None
     body = (body_key or "").strip() or None
     if header_key and body and header_key != body:
@@ -79,7 +78,7 @@ def resolve_idempotency_key(request: Request, body_key: str | None = None) -> st
 
 
 async def begin_idempotency(
-    db: AsyncSession, request: Request, key: str
+    db: AsyncSession, request: Request, key: str, *, _attempts: int = 0
 ) -> IdempotencyOutcome:
     digest = _body_digest(request)
     org_id, user_id = await _resolve_context(request)
@@ -126,7 +125,12 @@ async def begin_idempotency(
 
     if existing is None:
         await db.commit()
-        return await begin_idempotency(db, request, key)
+        if _attempts >= 2:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Idempotency reservation failed after retries.",
+            )
+        return await begin_idempotency(db, request, key, _attempts=_attempts + 1)
 
     if existing.request_hash != digest:
         await db.commit()
@@ -185,7 +189,6 @@ async def complete_idempotency(
     response_reference: str,
     lease_token: str | None = None,
 ) -> bool:
-    """Mark completed/failed. Returns False if fencing rejects this caller."""
     org_id, user_id = await _resolve_context(request)
     existing = (
         await db.execute(
