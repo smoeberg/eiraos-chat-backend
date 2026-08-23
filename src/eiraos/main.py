@@ -120,15 +120,19 @@ async def health_ready():
         health_status["status"] = "degraded"
         health_status["database"] = "unavailable"
 
-    try:
-        redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
-        await redis_client.ping()
-        await redis_client.close()
-        health_status["redis"] = "connected"
-    except Exception as e:
-        logger.error("health_check_redis_failed", error=str(e))
-        health_status["status"] = "degraded"
-        health_status["redis"] = "unavailable"
+    if not settings.REDIS_URL:
+        # No Redis configured -> services falls back to in-memory rate limiting.
+        health_status["redis"] = "disabled"
+    else:
+        try:
+            redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
+            await redis_client.ping()
+            await redis_client.close()
+            health_status["redis"] = "connected"
+        except Exception as e:
+            logger.error("health_check_redis_failed", error=str(e))
+            health_status["status"] = "degraded"
+            health_status["redis"] = "unavailable"
 
     status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=status_code, content=health_status)

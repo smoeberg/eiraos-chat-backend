@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = ""
     OPENAI_API_KEY: Optional[str] = "sk-placeholder"
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None

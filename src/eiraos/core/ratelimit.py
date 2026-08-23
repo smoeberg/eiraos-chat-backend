@@ -14,7 +14,7 @@ from eiraos.core.config import settings
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["100/minute"],
-    storage_uri=settings.REDIS_URL,
+    storage_uri=settings.REDIS_URL or None,
 )
 
 # Tight limits on identity endpoints.
