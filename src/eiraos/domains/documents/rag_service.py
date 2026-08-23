@@ -39,6 +39,24 @@ class RAGService:
         return chunks
 
     @staticmethod
+    def _scope_clause(knowledge_scope: str) -> str:
+        scope = (knowledge_scope or "organization").lower()
+        if scope == "public":
+            return """
+              AND (
+                metadata IS NULL
+                OR (metadata::jsonb->>'visibility') IS NULL
+                OR (metadata::jsonb->>'visibility') = 'public'
+              )
+            """
+        if scope == "private":
+            return """
+              AND metadata IS NOT NULL
+              AND (metadata::jsonb->>'visibility') = 'private'
+            """
+        return ""
+
+    @staticmethod
     async def hybrid_search(
         db: AsyncSession,
         organization_id: int,
@@ -47,18 +65,26 @@ class RAGService:
         limit: int = 5,
         knowledge_scope: str = "organization",
     ) -> List[Dict[str, Any]]:
-        """Hybrid retrieval: pgvector cosine + PostgreSQL full-text, fused via RRF."""
+        """Hybrid retrieval: pgvector cosine + FTS, fused via RRF.
+
+        knowledge_scope:
+          - organization: all org chunks
+          - public: visibility public or unset
+          - private: visibility private
+        """
         embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
         qtext = (query_text or "").strip()
         rrf_k = 60
         fetch_n = max(limit * 4, 20)
+        scope_sql = RAGService._scope_clause(knowledge_scope)
 
         vector_sql = text(
-            """
+            f"""
             SELECT id, organization_id, content, metadata,
                    (1 - (embedding <=> :query_embedding::vector)) AS vector_score
             FROM document_chunks
             WHERE organization_id = :org_id
+            {scope_sql}
             ORDER BY embedding <=> :query_embedding::vector ASC
             LIMIT :lim
             """
@@ -78,7 +104,7 @@ class RAGService:
         if qtext:
             try:
                 fts_sql = text(
-                    """
+                    f"""
                     SELECT id, organization_id, content, metadata,
                            ts_rank(
                              to_tsvector('simple', coalesce(content, '')),
@@ -88,6 +114,7 @@ class RAGService:
                     WHERE organization_id = :org_id
                       AND to_tsvector('simple', coalesce(content, ''))
                           @@ plainto_tsquery('simple', :qtext)
+                    {scope_sql}
                     ORDER BY text_score DESC
                     LIMIT :lim
                     """
