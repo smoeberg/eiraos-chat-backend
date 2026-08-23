@@ -84,6 +84,36 @@ async def generate_embedding(text_content: str) -> List[float]:
         )
 
 
+async def _fail_document_ingest(
+    db: AsyncSession,
+    request: Request,
+    doc: Document,
+    ledger_key: str | None,
+    lease_token: str | None,
+    title: str,
+) -> None:
+    """Persist terminal failure when the background queue cannot accept a job."""
+    doc.status = "failed"
+    await db.commit()
+    if ledger_key:
+        try:
+            await idempotency.complete_idempotency(
+                db,
+                request,
+                ledger_key,
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                json.dumps({
+                    "status": "failed",
+                    "document_id": doc.id,
+                    "title": title,
+                    "detail": "Document ingestion queue unavailable.",
+                }),
+                lease_token=lease_token,
+            )
+        except Exception:
+            logger.exception("document_ingest_idempotency_failure", document_id=doc.id)
+
+
 @router.post(
     "/ingest",
     status_code=status.HTTP_202_ACCEPTED,
@@ -126,11 +156,19 @@ async def ingest_document(
     await db.commit()
     await db.refresh(doc)
 
-    job_id = await enqueue_document_ingestion(
-        document_id=doc.id,
-        organization_id=org_id,
-        content=payload.content,
-    )
+    try:
+        job_id = await enqueue_document_ingestion(
+            document_id=doc.id,
+            organization_id=org_id,
+            content=payload.content,
+        )
+    except Exception as exc:
+        await _fail_document_ingest(db, request, doc, ledger_key, lease_token, payload.title)
+        raise EiraOSException(
+            title="Job queue unavailable",
+            detail="Document ingestion could not be queued.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from exc
 
     # Sync fallback is server-side only (ALLOW_SYNC_INGEST_FALLBACK), never client-controlled.
     if job_id is None and getattr(settings, "ALLOW_SYNC_INGEST_FALLBACK", False):
