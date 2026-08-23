@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -17,6 +17,34 @@ router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+
+ROLE_PERMISSIONS = {
+    "owner": [
+        "organization:read", "organization:update", "member:invite", "member:remove", "member:manage",
+        "bot:read", "bot:create", "bot:update", "bot:delete",
+        "document:read", "document:upload", "document:delete",
+        "conversation:read", "conversation:create", "conversation:delete",
+        "usage:read", "secret:manage"
+    ],
+    "admin": [
+        "organization:read", "member:invite", "member:remove",
+        "bot:read", "bot:create", "bot:update", "bot:delete",
+        "document:read", "document:upload", "document:delete",
+        "conversation:read", "conversation:create", "conversation:delete",
+        "usage:read"
+    ],
+    "member": [
+        "bot:read",
+        "document:read", "document:upload",
+        "conversation:read", "conversation:create", "conversation:delete",
+        "usage:read"
+    ],
+    "viewer": [
+        "bot:read",
+        "document:read",
+        "conversation:read"
+    ]
+}
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -58,14 +86,15 @@ async def register_user(payload: UserRegister, db: AsyncSession = Depends(get_db
 
     user = User(
         email=payload.email,
+        name=payload.full_name,
+        username=payload.email,
         password_hash=get_password_hash(payload.password),
         role="member",
         is_enabled=True
     )
     db.add(user)
-    await db.flush() # Flush to get user.id
+    await db.flush()
 
-    # Automatically create a default organization for the new user (Fail-Closed, zero orphaned users)
     org_name = f"{payload.email.split('@')[0]}'s Organization"
     org = Organization(name=org_name, slug=org_name.lower().replace(" ", "-"))
     db.add(org)
@@ -83,7 +112,7 @@ async def register_user(payload: UserRegister, db: AsyncSession = Depends(get_db
 
 @router.post("/login", response_model=TokenResponse)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == form_data.username))
+    result = await db.execute(select(User).where((User.email == form_data.username) | (User.username == form_data.username)))
     user = result.scalars().first()
 
     if not user or not user.is_enabled or not user.password_hash:
@@ -92,7 +121,6 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
     if not verify_password(form_data.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
-    # Fetch organization membership (Fail-Closed: no default organization 1 fallback)
     org_res = await db.execute(select(OrganizationMember).where(OrganizationMember.user_id == user.id))
     membership = org_res.scalars().first()
     
@@ -102,7 +130,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
     access_token = create_access_token(data={
         "sub": user.email,
         "user_id": user.id,
-        "role": user.role,
+        "role": membership.role,
         "organization_id": membership.organization_id
     })
     return {"access_token": access_token, "token_type": "bearer"}
@@ -147,6 +175,18 @@ async def get_current_active_organization(
         raise HTTPException(status_code=403, detail="User is not a member of this organization")
 
     return org_id
+
+def require_permission(required_permission: str):
+    async def permission_dependency(current_user: dict = Depends(get_current_user)):
+        role = current_user.get("role", "member")
+        permissions = ROLE_PERMISSIONS.get(role, [])
+        if required_permission not in permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied: missing required permission '{required_permission}'"
+            )
+        return current_user
+    return permission_dependency
 
 @router.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
