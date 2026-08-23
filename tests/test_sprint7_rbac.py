@@ -56,8 +56,14 @@ def test_require_permission_allows_holder():
     async def _run():
         dep = require_permission("bot:create")
         user = {"role": "admin", "organization_id": 1, "user_id": 2}
-        # call the inner dependency directly with an explicit current_user
-        result = await dep.__call__(current_user=user)
+        from unittest.mock import AsyncMock, MagicMock
+        mock_db = AsyncMock()
+        mock_membership = MagicMock(role="admin")
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = mock_membership
+        mock_db.execute.return_value = mock_result
+        # call the inner dependency directly with explicit current_user and db
+        result = await dep.__call__(current_user=user, db=mock_db)
         assert result == user
 
     anyio.run(_run)
@@ -67,8 +73,14 @@ def test_require_permission_denies_non_holder():
     async def _run():
         dep = require_permission("bot:create")
         user = {"role": "viewer", "organization_id": 1, "user_id": 2}
+        from unittest.mock import AsyncMock, MagicMock
+        mock_db = AsyncMock()
+        mock_membership = MagicMock(role="viewer")
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = mock_membership
+        mock_db.execute.return_value = mock_result
         try:
-            await dep.__call__(current_user=user)
+            await dep.__call__(current_user=user, db=mock_db)
             raise AssertionError("expected 403 for missing permission")
         except HTTPException as e:
             assert e.status_code == 403

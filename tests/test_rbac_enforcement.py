@@ -55,12 +55,20 @@ def test_rbac_wired_on_endpoints(module, permission):
 def test_role_permission_matrix(role, permission, should_allow):
     async def run():
         dep = require_permission(permission)
-        user = {"role": role, "user_id": 1, "email": "x@y.z"}
+        user = {"role": role, "user_id": 1, "organization_id": 1, "email": "x@y.z"}
+        from unittest.mock import AsyncMock, MagicMock
+        mock_db = AsyncMock()
+        mock_membership = MagicMock(role=role)
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = mock_membership
+        mock_db.execute.return_value = mock_result
+
         if should_allow:
-            assert await dep(user) == user
+            res = await dep(current_user=user, db=mock_db)
+            assert res == user
         else:
             with pytest.raises(HTTPException) as exc:
-                await dep(user)
+                await dep(current_user=user, db=mock_db)
             assert exc.value.status_code == 403
 
     import asyncio
