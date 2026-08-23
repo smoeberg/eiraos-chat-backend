@@ -4,6 +4,25 @@
 
 ---
 
+## Quick path (recommended)
+
+On a machine with Docker + kubectl + registry auth:
+
+```bash
+git pull origin main
+export DATABASE_URL='postgresql+asyncpg://...'
+export REDIS_URL='redis://...'
+export SECRET_KEY="$(openssl rand -hex 32)"
+# optional: REGISTRY, NS, DEPLOY_NAME, BASE_URL, EMAIL, PASSWORD
+chmod +x deploy/staging_deploy.sh
+./deploy/staging_deploy.sh
+```
+
+Script: [`deploy/staging_deploy.sh`](staging_deploy.sh) — build → push → secrets → apply → migrate → smoke.
+Validated with `bash -n` (LF line endings, complete `if`/`fi` blocks).
+
+---
+
 ## 0. Prerequisites
 
 | Item | Example |
@@ -54,6 +73,8 @@ Never commit secret values. Prefer External Secrets / Vault CSI when available.
 
 ## 3. Database migration
 
+Handled by `staging_deploy.sh`, or manually:
+
 ```bash
 kubectl -n "$NS" run eiraos-migrate --rm -it --restart=Never \
   --image="$IMAGE" \
@@ -64,8 +85,6 @@ kubectl -n "$NS" run eiraos-migrate --rm -it --restart=Never \
 ---
 
 ## 4. Apply Kubernetes manifests
-
-Update image in `deploy/k8s/deployment.yaml`, then:
 
 ```bash
 kubectl -n "$NS" apply -f deploy/k8s/networkpolicy.yaml
@@ -85,8 +104,6 @@ Ensure **worker** is running: `arq eiraos.workers.tasks.WorkerSettings`.
 export BASE_URL=https://api.staging.example.com
 export EMAIL=...
 export PASSWORD=...
-
-# Or: kubectl -n $NS port-forward svc/eiraos-chat-backend 8000:80
 
 chmod +x scripts/gate12_staging_smoke.sh
 ./scripts/gate12_staging_smoke.sh
