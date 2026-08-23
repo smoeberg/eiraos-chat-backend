@@ -22,6 +22,7 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "bcrypt==4.0.1",
     "python-multipart>=0.0.9",
+    "email-validator>=2.1.0",
     "httpx>=0.26.0",
     "structlog>=24.1.0",
     "prometheus-fastapi-instrumentator>=6.1.0",
