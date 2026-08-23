@@ -4,12 +4,14 @@ from eiraos.core.database import Base
 
 
 class IdempotencyRecord(Base):
-    """Persistent atomic idempotency ledger (supersedes the in-memory dict stub)."""
+    """Persistent atomic idempotency ledger with lease support."""
 
     __tablename__ = "idempotency_records"
     __table_args__ = (
-        UniqueConstraint("organization_id", "user_id", "key",
-                         name="uq_idempotency_org_user_key"),
+        UniqueConstraint(
+            "organization_id", "user_id", "key",
+            name="uq_idempotency_org_user_key",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -18,8 +20,12 @@ class IdempotencyRecord(Base):
     key = Column(String(128), nullable=False)
     request_hash = Column(String(64), nullable=False)
     status = Column(String(16), nullable=False, default="processing")
+    # processing | completed | failed
     response_status = Column(Integer, nullable=True)
     response_reference = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow,
-                        server_default=text("CURRENT_TIMESTAMP"))
+    created_at = Column(
+        DateTime, default=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
     expires_at = Column(DateTime, nullable=True)
+    lease_until = Column(DateTime, nullable=True)  # live processing lease
