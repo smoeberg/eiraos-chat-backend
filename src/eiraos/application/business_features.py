@@ -1,7 +1,6 @@
 """Business services migrated from the legacy aimultichat workflow."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 from eiraos.application.providers.base import AIProviderProtocol
@@ -26,12 +25,21 @@ VERIFICATION_FAILED_BADGE = (
 )
 
 
-@dataclass(frozen=True)
-class VerificationResult:
+class VerificationResult(str):
+    """String-compatible verification result with structured metadata."""
+
     status: str
     reason: str
     answer: str
     verified: bool
+
+    def __new__(cls, status: str, reason: str, answer: str, verified: bool):
+        instance = super().__new__(cls, answer)
+        instance.status = status
+        instance.reason = reason
+        instance.answer = answer
+        instance.verified = verified
+        return instance
 
 
 def _parse_verification(raw: str) -> tuple[str, str]:
@@ -54,18 +62,16 @@ async def verify_answer(
     verifier: AIProviderProtocol,
     model: str,
 ) -> VerificationResult:
-    """Verify a primary answer without silently rewriting it.
-
-    A response is marked verified only when the verifier explicitly returns PASS.
-    FAIL and UNCERTAIN are fail-closed for the verification badge.
-    """
+    """Verify a primary answer; only explicit PASS is marked verified."""
     verification_messages = [
         {"role": "user", "content": f"BRUGERENS SPØRGSMÅL:\n{original_prompt}"},
         {"role": "assistant", "content": f"FORESLÅET SVAR, DER SKAL VERIFICERES:\n{primary_answer}"},
         {"role": "user", "content": "Verificér nu det foreslåede svar. Returnér kun din kvalitetskontrol som JSON."},
     ]
     raw = await verifier.generate_chat_completion(
-        model=model, messages=verification_messages, system_prompt=VERIFICATION_SYSTEM_PROMPT,
+        model=model,
+        messages=verification_messages,
+        system_prompt=VERIFICATION_SYSTEM_PROMPT,
     )
     status, reason = _parse_verification(str(raw))
     if status == "PASS":
