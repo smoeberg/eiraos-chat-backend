@@ -31,7 +31,6 @@ def _redis_settings() -> RedisSettings:
 
 
 async def _embed(text_content: str) -> list[float] | None:
-    """Best-effort embedding; returns None if provider unavailable."""
     key = settings.OPENAI_API_KEY
     if not key or key in ("sk-placeholder", "replace-me"):
         return None
@@ -113,14 +112,25 @@ async def process_document_ingestion(
             }
 
 
+async def cleanup_expired_idempotency(ctx):
+    """Periodic retention: delete expired completed/failed idempotency rows."""
+    from eiraos.core.idempotency import cleanup_expired_records
+
+    async with async_session_maker() as session:
+        deleted = await cleanup_expired_records(session, limit=2000)
+    logger.info("idempotency_cleanup", deleted=deleted)
+    return {"status": "ok", "deleted": deleted}
+
+
 async def aggregate_ai_usage_metrics(ctx):
     logger.info("usage_metrics_aggregation_skipped", reason="no_usage_table")
     return {"status": "skipped", "reason": "no_usage_table"}
 
 
 class WorkerSettings:
-    functions = [process_document_ingestion]
+    functions = [process_document_ingestion, cleanup_expired_idempotency]
     cron_jobs = [
         arq.cron(aggregate_ai_usage_metrics, minute={0, 30}),
+        arq.cron(cleanup_expired_idempotency, minute={15}),
     ]
     redis_settings = _redis_settings()
