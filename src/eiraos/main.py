@@ -25,7 +25,13 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+# Redis-backed SlowAPI rate limiter
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100/minute"],
+    storage_uri=settings.REDIS_URL
+)
+
 app = FastAPI(
     title="EiraOS Enterprise Chat Backend",
     version="1.0.0",
@@ -36,12 +42,12 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS Middleware
+# Secure CORS Middleware (explicit origins or allow_credentials=False for wildcard)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "https://app.eiraos.ai"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -78,16 +84,16 @@ async def eiraos_exception_handler(request: Request, exc: EiraOSException):
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 # Prometheus instrumentation
-Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
-@app.get("/health", tags=["System"])
-async def health_check():
-    """
-    Robust system health check verifying PostgreSQL and Redis connectivity.
-    """
+@app.get("/health/live", tags=["System"])
+async def health_live():
+    return {"status": "alive"}
+
+@app.get("/health/ready", tags=["System"])
+async def health_ready():
     health_status = {"status": "healthy", "database": "disconnected", "redis": "disconnected"}
     
-    # Check PostgreSQL
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
@@ -96,7 +102,6 @@ async def health_check():
         health_status["status"] = "degraded"
         health_status["database_error"] = str(e)
 
-    # Check Redis
     try:
         redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
         await redis_client.ping()
@@ -108,6 +113,10 @@ async def health_check():
 
     status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=status_code, content=health_status)
+
+@app.get("/health", tags=["System"])
+async def health_check():
+    return await health_ready()
 
 @app.get("/", tags=["System"])
 async def root():
