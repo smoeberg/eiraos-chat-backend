@@ -15,19 +15,34 @@ spec:
       labels:
         app: eiraos-chat-backend
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: backend
         image: ghcr.io/smoeberg/eiraos-chat-backend:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
+          name: http
         env:
+        - name: APP_ENV
+          value: "production"
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
               name: eiraos-secrets
               key: database-url
-        - name: REDIS_HOST
-          value: "redis-master"
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: eiraos-secrets
+              key: redis-url
+              optional: true
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -40,15 +55,35 @@ spec:
           requests:
             cpu: "500m"
             memory: "512Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          failureThreshold: 30
+          periodSeconds: 5
         readinessProbe:
           httpGet:
-            path: /health
-            port: 8000
+            path: /health/ready
+            port: http
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
           httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 10
-          periodSeconds: 15
+            path: /health/live
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 20
+      volumes:
+      - name: tmp
+        emptyDir: {}
