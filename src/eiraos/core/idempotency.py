@@ -21,10 +21,14 @@ async def enforce_idempotency(request: Request):
         return stored["response"]
     return None
 
-def record_idempotency(request: Request, response_data: dict):
+async def record_idempotency(request: Request, response_data: dict):
     key = request.headers.get("Idempotency-Key")
     if not key:
         return
-    import asyncio
-    # Simple store recording
-    pass
+    body = await request.body()
+    body_hash = hashlib.sha256(body).hexdigest()
+    IDEMPOTENCY_STORE[key] = {
+        "hash": body_hash,
+        "response": response_data
+    }
+
