@@ -22,7 +22,6 @@ router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
-# JWT issuer/audience for strict claim validation.
 TOKEN_ISSUER = "eiraos"
 TOKEN_AUDIENCE = "eiraos-api"
 
@@ -215,7 +214,6 @@ async def get_current_active_organization(
     if not membership:
         raise HTTPException(status_code=403, detail="User is not a member of this organization")
 
-    # Ensure a revoked token_version is rejected at request time.
     async def _load_user_version():
         u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
         return u.token_version if u else None
@@ -229,8 +227,29 @@ async def get_current_active_organization(
     return org_id
 
 def require_permission(required_permission: str):
-    async def permission_dependency(current_user: dict = Depends(get_current_user)):
-        role = current_user.get("role", "member")
+    """Enforce permission using *current* DB membership role (not stale JWT role)."""
+    async def permission_dependency(
+        current_user: dict = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ):
+        user_id = current_user.get("user_id")
+        org_id = current_user.get("organization_id")
+        if not user_id or not org_id:
+            raise HTTPException(status_code=403, detail="Invalid organization context")
+
+        res = await db.execute(
+            select(OrganizationMember).where(
+                OrganizationMember.user_id == user_id,
+                OrganizationMember.organization_id == org_id,
+            )
+        )
+        membership = res.scalars().first()
+        if not membership:
+            raise HTTPException(status_code=403, detail="User is not a member of this organization")
+
+        role = membership.role or "member"
+        current_user["role"] = role
+
         permissions = ROLE_PERMISSIONS.get(role, [])
         if required_permission not in permissions:
             raise HTTPException(
