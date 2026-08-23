@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
 from eiraos.core.database import get_db
-from eiraos.api.v1.auth import get_current_user, get_current_active_organization
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.documents.models import DocumentChunk
 from eiraos.domains.documents.rag_service import RAGService
 from eiraos.core.config import settings
@@ -72,7 +72,7 @@ async def generate_embedding(text_content: str) -> List[float]:
         )
 
 
-@router.post("/ingest", status_code=status.HTTP_201_CREATED)
+@router.post("/ingest", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_permission("document:upload"))])
 async def ingest_document(
     payload: DocumentIngestRequest,
     request: Request,
@@ -146,7 +146,7 @@ async def ingest_document(
     }
 
 
-@router.post("/search")
+@router.post("/search", dependencies=[Depends(require_permission("document:read"))])
 async def search_documents(
     payload: DocumentSearchRequest,
     current_user: dict = Depends(get_current_user),

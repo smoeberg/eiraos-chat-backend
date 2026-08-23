@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from eiraos.core.database import get_db
 from eiraos.domains.organizations.models import Organization, OrganizationMember
-from eiraos.api.v1.auth import get_current_user
+from eiraos.api.v1.auth import get_current_user, require_permission
 
 router = APIRouter(prefix="/organizations", tags=["Organizations & Multi-Tenancy"])
 
@@ -38,7 +38,7 @@ async def create_organization(
     await db.refresh(org)
     return {"id": org.id, "name": org.name, "slug": org.slug}
 
-@router.get("", response_model=List[OrganizationResponseSchema])
+@router.get("", response_model=List[OrganizationResponseSchema], dependencies=[Depends(require_permission("organization:read"))])
 async def list_organizations(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user)

@@ -4,7 +4,7 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from eiraos.core.database import get_db
-from eiraos.api.v1.auth import get_current_user, get_current_active_organization
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.conversations.models import Conversation, Message
 
 router = APIRouter(prefix="/conversations", tags=["Conversations & History"])
@@ -34,7 +34,7 @@ class MessageResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_permission("conversation:create"))])
 async def create_conversation(
     payload: ConversationCreate,
     current_user: dict = Depends(get_current_user),
@@ -58,7 +58,7 @@ async def create_conversation(
         "updated_at": str(conv.updated_at)
     }
 
-@router.get("", response_model=List[ConversationResponse])
+@router.get("", response_model=List[ConversationResponse], dependencies=[Depends(require_permission("conversation:read"))])
 async def list_conversations(
     current_user: dict = Depends(get_current_user),
     org_id: int = Depends(get_current_active_organization),
@@ -87,7 +87,7 @@ async def list_conversations(
         "updated_at": str(c.updated_at)
     } for c in conversations]
 
-@router.get("/{conversation_id}/messages", response_model=List[MessageResponse])
+@router.get("/{conversation_id}/messages", response_model=List[MessageResponse], dependencies=[Depends(require_permission("conversation:read"))])
 async def get_conversation_messages(
     conversation_id: int,
     limit: int = Query(200, ge=1, le=5000),
@@ -124,7 +124,7 @@ async def get_conversation_messages(
         "created_at": str(m.created_at)
     } for m in messages]
 
-@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_permission("conversation:delete"))])
 async def delete_conversation(
     conversation_id: int,
     current_user: dict = Depends(get_current_user),

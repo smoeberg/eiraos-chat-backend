@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from eiraos.core.database import get_db
-from eiraos.api.v1.auth import get_current_user, get_current_active_organization
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.domains.agents.models import Bot
 from eiraos.application.providers.factory import AIProviderFactory
@@ -57,7 +57,7 @@ def _bot_accessible(bot: Bot, org_id: int) -> bool:
     return Bot.visibility(bot) == "public"
 
 
-@router.post("/completions")
+@router.post("/completions", dependencies=[Depends(require_permission("conversation:create"))])
 async def create_chat_completion(
     request: Request,
     payload: ChatCompletionRequest,
