@@ -22,7 +22,6 @@ class DocumentSearchRequest(BaseModel):
     limit: int = 5
 
 async def generate_embedding(text_content: str) -> List[float]:
-    """Helper to generate text embedding via OpenAI API."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             "https://api.openai.com/v1/embeddings",
@@ -40,9 +39,6 @@ async def ingest_document(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Ingest document, perform intelligent chunking, compute embeddings, and store in pgvector.
-    """
     chunks = RAGService.intelligent_chunking(payload.content)
     stored_count = 0
 
@@ -53,12 +49,11 @@ async def ingest_document(
                 organization_id=org_id,
                 content=chunk_text,
                 embedding=embedding,
-                metadata={"title": payload.title, **(payload.metadata or {})}
+                metadata_={"title": payload.title, **(payload.metadata or {})}
             )
             db.add(chunk_db)
             stored_count += 1
         except Exception as e:
-            # If embedding generation fails for a chunk, continue or log error
             continue
 
     await db.commit()
@@ -71,9 +66,6 @@ async def search_documents(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Perform hybrid vector semantic search within the tenant's organization scope.
-    """
     try:
         query_embedding = await generate_embedding(payload.query)
     except Exception as e:
