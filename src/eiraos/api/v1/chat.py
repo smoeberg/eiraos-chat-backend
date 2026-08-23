@@ -27,6 +27,7 @@ class ChatCompletionRequest(BaseModel):
     bot_id: int
     prompt: str
     stream: bool = True
+    # Optional; header Idempotency-Key is authoritative (mismatch → 400)
     idempotency_key: str | None = None
 
 
@@ -48,12 +49,11 @@ async def _build_messages(
     system_prompt: str | None,
     max_history: int = 20,
 ) -> list[dict]:
-    """Build provider messages: recent history + current user turn."""
     stmt = (
         select(Message)
         .where(
             Message.conversation_id == conversation_id,
-            Message.status.in_(["completed", "interrupted"]),
+            Message.status.in_(["completed", "cancelled"]),
         )
         .order_by(Message.created_at.desc())
         .limit(max_history)
@@ -97,13 +97,17 @@ async def create_chat_completion(
     if not bot or not _bot_accessible(bot, org_id):
         raise HTTPException(status_code=404, detail="Bot not found or access denied")
 
-    idem_key = (payload.idempotency_key or "").strip() or None
+    idem_key = idempotency.resolve_idempotency_key(
+        request, getattr(payload, "idempotency_key", None)
+    )
+    lease_token: str | None = None
     if idem_key:
-        begin_status = await idempotency.begin_idempotency(db, request, idem_key)
-        if begin_status == "completed":
+        outcome = await idempotency.begin_idempotency(db, request, idem_key)
+        if outcome.status == "completed":
             cached = await idempotency.read_cached_response(db, request, idem_key)
             if cached is not None:
                 return json.loads(cached)
+        lease_token = outcome.lease_token
 
     user_msg = Message(
         conversation_id=conversation.id,
@@ -158,6 +162,7 @@ async def create_chat_completion(
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_200_OK,
                     json.dumps({"assistant": full_response}),
+                    lease_token=lease_token,
                 )
             return {"role": "assistant", "content": full_response, "ai_marked": True}
         except HTTPException:
@@ -166,6 +171,7 @@ async def create_chat_completion(
             if idem_key:
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_500_INTERNAL_SERVER_ERROR, "failed",
+                    lease_token=lease_token,
                 )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -203,6 +209,8 @@ async def create_chat_completion(
                         break
                     accumulated += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+                    if await request.is_disconnected():
+                        raise asyncio.CancelledError()
                     now = asyncio.get_event_loop().time()
                     if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
                         yield ": keep-alive\n\n"
@@ -220,19 +228,20 @@ async def create_chat_completion(
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_200_OK,
                     json.dumps({"assistant": accumulated}),
+                    lease_token=lease_token,
                 )
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated})}\n\n"
         except asyncio.CancelledError:
             try:
-                interrupted = Message(
+                cancelled_msg = Message(
                     conversation_id=conversation.id,
                     role="assistant",
                     content=accumulated,
                     bot_id=bot.id,
-                    status="interrupted",
+                    status="cancelled",
                     ai_marked=True,
                 )
-                db.add(interrupted)
+                db.add(cancelled_msg)
                 await db.commit()
             except Exception:
                 pass
