@@ -39,23 +39,33 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Register custom middlewares
+# Custom Rate Limit Exceeded handler returning RFC 7807 format
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={
+            "type": "about:blank",
+            "title": "Rate Limit Exceeded",
+            "status": 429,
+            "detail": "Too many requests. Please slow down.",
+            "instance": request.url.path
+        }
+    )
+
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TenantIsolationMiddleware)
 app.add_middleware(RequestTracingMiddleware)
 
-# Secure CORS Middleware (explicit origins only)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://app.eiraos.ai", "https://admin.eiraos.ai"],
+    allow_origins=["https://app.eiraos.ai", "https://admin.eiraos.ai", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Global Exception Handlers
 @app.exception_handler(EiraOSException)
 async def eiraos_exception_handler(request: Request, exc: EiraOSException):
     return JSONResponse(
@@ -86,8 +96,9 @@ async def health_ready():
             await session.execute(text("SELECT 1"))
             health_status["database"] = "connected"
     except Exception as e:
+        logger.error("health_check_database_failed", error=str(e))
         health_status["status"] = "degraded"
-        # Sanitized: do not leak exception text/stack trace to client
+        health_status["database"] = "unavailable"
 
     try:
         redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
@@ -95,8 +106,9 @@ async def health_ready():
         await redis_client.close()
         health_status["redis"] = "connected"
     except Exception as e:
+        logger.error("health_check_redis_failed", error=str(e))
         health_status["status"] = "degraded"
-        # Sanitized: do not leak exception text/stack trace to client
+        health_status["redis"] = "unavailable"
 
     status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=status_code, content=health_status)
