@@ -77,3 +77,26 @@ async def test_bot_visibility_reconciles_is_public_overrides():
     assert Bot.visibility(_mk(bot_visibility="organization", is_public=False)) == "organization"
     # default when nothing set
     assert Bot.visibility(_mk(bot_visibility="private")) == "private"
+
+
+@pytest.mark.asyncio
+async def test_streaming_does_not_leak_secrets():
+    secret = "TEST_SUPER_SECRET_KEY_999"
+    from httpx import AsyncClient, ASGITransport
+    from eiraos.main import app
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        payload = {
+            "conversation_id": 1,
+            "bot_id": 1,
+            "prompt": "Hello",
+            "stream": True,
+        }
+        async with client.stream(
+            "POST",
+            "/api/v1/chat/completions",
+            json=payload,
+        ) as response:
+            async for line in response.aiter_lines():
+                assert secret not in line
+
