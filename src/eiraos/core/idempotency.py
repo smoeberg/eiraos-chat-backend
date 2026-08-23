@@ -1,7 +1,8 @@
 """Persistent, atomic idempotency service with lease fencing.
 
-Completion only succeeds when lease_token still matches — prevents a stale
-worker from overwriting a reclaimed reservation's result.
+Completion only succeeds when lease_token still matches and the lease is
+still active, preventing stale workers from publishing results after a
+reservation has been reclaimed.
 """
 from __future__ import annotations
 
@@ -101,9 +102,7 @@ async def begin_idempotency(
             lease_until=lease_until,
             lease_token=token,
         )
-        .on_conflict_do_nothing(
-            index_elements=["organization_id", "user_id", "key"]
-        )
+        .on_conflict_do_nothing(index_elements=["organization_id", "user_id", "key"])
         .returning(IdempotencyRecord.id)
     )
     result = await db.execute(stmt)
@@ -112,33 +111,23 @@ async def begin_idempotency(
         await db.commit()
         return IdempotencyOutcome("processing", token)
 
-    existing = (
-        await db.execute(
-            select(IdempotencyRecord)
-            .where(
-                IdempotencyRecord.organization_id == org_id,
-                IdempotencyRecord.user_id == user_id,
-                IdempotencyRecord.key == key,
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    existing = (await db.execute(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.organization_id == org_id,
+            IdempotencyRecord.user_id == user_id,
+            IdempotencyRecord.key == key,
+        ).with_for_update()
+    )).scalar_one_or_none()
 
     if existing is None:
         await db.commit()
         if _attempts >= 2:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Idempotency reservation failed after retries.",
-            )
+            raise HTTPException(status_code=503, detail="Idempotency reservation failed after retries.")
         return await begin_idempotency(db, request, key, _attempts=_attempts + 1)
 
     if existing.request_hash != digest:
         await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Idempotency key was reused with a different payload.",
-        )
+        raise HTTPException(status_code=409, detail="Idempotency key was reused with a different payload.")
 
     exp = _as_utc(existing.expires_at)
     if existing.status == "completed" and exp is not None and exp < now:
@@ -176,19 +165,13 @@ async def begin_idempotency(
         return IdempotencyOutcome("processing", token)
 
     await db.commit()
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail="A request with this idempotency key is already in progress.",
-    )
+    raise HTTPException(status_code=409, detail="A request with this idempotency key is already in progress.")
 
 
 async def renew_idempotency_lease(
-    db: AsyncSession,
-    request: Request,
-    key: str,
-    lease_token: str,
+    db: AsyncSession, request: Request, key: str, lease_token: str
 ) -> bool:
-    """Atomically extend a lease only while this caller still owns it."""
+    """Atomically extend the lease only while this caller still owns it."""
     org_id, user_id = await _resolve_context(request)
     now = _utcnow()
     result = await db.execute(
@@ -215,23 +198,22 @@ async def complete_idempotency(
     lease_token: str | None = None,
 ) -> bool:
     org_id, user_id = await _resolve_context(request)
-    existing = (
-        await db.execute(
-            select(IdempotencyRecord)
-            .where(
-                IdempotencyRecord.organization_id == org_id,
-                IdempotencyRecord.user_id == user_id,
-                IdempotencyRecord.key == key,
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    now = _utcnow()
+    existing = (await db.execute(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.organization_id == org_id,
+            IdempotencyRecord.user_id == user_id,
+            IdempotencyRecord.key == key,
+        ).with_for_update()
+    )).scalar_one_or_none()
     if existing is None:
         return False
 
-    if lease_token is not None and existing.lease_token not in (None, lease_token):
-        await db.commit()
-        return False
+    if lease_token is not None:
+        lease = _as_utc(existing.lease_until)
+        if existing.lease_token not in (None, lease_token) or (lease is not None and lease < now):
+            await db.commit()
+            return False
 
     existing.status = "completed" if 200 <= response_status < 300 else "failed"
     existing.response_status = response_status
@@ -241,20 +223,16 @@ async def complete_idempotency(
     return True
 
 
-async def read_cached_response(
-    db: AsyncSession, request: Request, key: str
-) -> str | None:
+async def read_cached_response(db: AsyncSession, request: Request, key: str) -> str | None:
     org_id, user_id = await _resolve_context(request)
-    existing = (
-        await db.execute(
-            select(IdempotencyRecord).where(
-                IdempotencyRecord.organization_id == org_id,
-                IdempotencyRecord.user_id == user_id,
-                IdempotencyRecord.key == key,
-                IdempotencyRecord.status == "completed",
-            )
+    existing = (await db.execute(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.organization_id == org_id,
+            IdempotencyRecord.user_id == user_id,
+            IdempotencyRecord.key == key,
+            IdempotencyRecord.status == "completed",
         )
-    ).scalar_one_or_none()
+    )).scalar_one_or_none()
     return existing.response_reference if existing else None
 
 
@@ -264,7 +242,7 @@ async def cleanup_expired_records(db: AsyncSession, limit: int = 1000) -> int:
         delete(IdempotencyRecord).where(
             IdempotencyRecord.expires_at.is_not(None),
             IdempotencyRecord.expires_at < now,
-            IdempotencyRecord.status.in_(["completed", "failed"]),
+            IdempotencyRecord.status.in_(["completed", "failed"),
         ).execution_options(synchronize_session=False)
     )
     await db.commit()
