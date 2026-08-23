@@ -48,6 +48,39 @@ async def _next_chunk(stream, timeout: float):
         return None
 
 
+async def _lease_heartbeat(db: AsyncSession, request: Request, key: str, lease_token: str, lost: asyncio.Event) -> None:
+    """Keep a chat idempotency lease alive while a long AI operation runs."""
+    interval = max(1, min(idempotency.LEASE_RENEWAL_SECONDS, idempotency.LEASE_SECONDS // 2))
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            if not await idempotency.renew_idempotency_lease(db, request, key, lease_token):
+                lost.set()
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        lost.set()
+
+
+async def _start_lease_heartbeat(db: AsyncSession, request: Request, key: str | None, lease_token: str | None):
+    if not key or not lease_token:
+        return None, None
+    lost = asyncio.Event()
+    task = asyncio.create_task(_lease_heartbeat(db, request, key, lease_token, lost))
+    return task, lost
+
+
+async def _stop_lease_heartbeat(task, lost: asyncio.Event | None) -> bool:
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    return not lost.is_set() if lost is not None else True
+
+
 async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt: str, system_prompt: str | None,
                           max_history: int = 40, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> list[dict]:
     stmt = (select(Message).where(Message.conversation_id == conversation_id,
@@ -192,9 +225,12 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         raise HTTPException(status_code=500, detail="AI provider could not be initialized.")
 
     if not payload.stream:
+        heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
             full_response = await provider.generate_chat_completion(model=bot.model, messages=provider_messages,
                                                                      system_prompt=effective_system_prompt)
+            if lease_lost is not None and lease_lost.is_set():
+                raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
             verified = False
             verification_status = None
             verification_reason = None
@@ -210,6 +246,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 verified = result.verified
                 verification_status = result.status
                 verification_reason = result.reason
+            if lease_lost is not None and lease_lost.is_set():
+                raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
             db.add(Message(conversation_id=conversation.id, role="assistant", content=full_response, bot_id=bot.id,
                            status="completed", ai_marked=True))
             await db.commit()
@@ -217,20 +255,26 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                                 "verified": verified, "verification_status": verification_status,
                                 "verification_reason": verification_reason}
             if idem_key:
-                await idempotency.complete_idempotency(db, request, idem_key, status.HTTP_200_OK,
-                                                       json.dumps(response_payload), lease_token=lease_token)
+                if not await idempotency.complete_idempotency(db, request, idem_key, status.HTTP_200_OK,
+                                                              json.dumps(response_payload), lease_token=lease_token):
+                    raise HTTPException(status_code=409, detail="Idempotency lease was lost before completion.")
             return response_payload
         except HTTPException:
+            if idem_key:
+                await idempotency.complete_idempotency(db, request, idem_key, 409, "failed", lease_token=lease_token)
             raise
         except Exception:
             if idem_key:
                 await idempotency.complete_idempotency(db, request, idem_key, 500, "failed", lease_token=lease_token)
             raise HTTPException(status_code=502, detail="AI provider could not fulfil the request.")
+        finally:
+            await _stop_lease_heartbeat(heartbeat_task, lease_lost)
 
     async def event_generator() -> AsyncIterator[str]:
         accumulated = ""
         last_heartbeat = asyncio.get_event_loop().time()
         asst_id = None
+        heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
             pending = Message(conversation_id=conversation.id, role="assistant", content="", bot_id=bot.id,
                               status="streaming", ai_marked=True)
@@ -246,6 +290,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     chunk = await _next_chunk(stream, SSE_CHUNK_TIMEOUT_SECONDS)
                     if chunk is None:
                         break
+                    if lease_lost is not None and lease_lost.is_set():
+                        raise RuntimeError("idempotency lease was lost during AI processing")
                     accumulated += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                     if await request.is_disconnected():
@@ -274,13 +320,16 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 verification_reason = result.reason
                 yield f"data: {json.dumps({'type': 'verification', 'status': verification_status, 'verified': verified, 'reason': verification_reason})}\n\n"
 
+            if lease_lost is not None and lease_lost.is_set():
+                raise RuntimeError("idempotency lease was lost before completion")
             await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "completed")
             if idem_key:
                 done_payload = {"role": "assistant", "content": accumulated, "ai_marked": True,
                                 "verified": verified, "verification_status": verification_status,
                                 "verification_reason": verification_reason}
-                await idempotency.complete_idempotency(db, request, idem_key, 200,
-                                                       json.dumps(done_payload), lease_token=lease_token)
+                if not await idempotency.complete_idempotency(db, request, idem_key, 200,
+                                                              json.dumps(done_payload), lease_token=lease_token):
+                    raise RuntimeError("idempotency lease was lost before completion")
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified, 'verification_status': verification_status, 'verification_reason': verification_reason})}\n\n"
         except asyncio.CancelledError:
             try:
@@ -293,6 +342,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "failed")
             except Exception:
                 pass
+            if idem_key:
+                await idempotency.complete_idempotency(db, request, idem_key, 500, "failed", lease_token=lease_token)
             yield f"data: {json.dumps({'type': 'error', 'detail': _sanitize()})}\n\n"
+        finally:
+            await _stop_lease_heartbeat(heartbeat_task, lease_lost)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
