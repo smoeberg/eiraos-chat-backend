@@ -130,3 +130,68 @@ def test_bot_create_rejects_contradictory_visibility():
     from eiraos.api.v1 import chat
     assert chat.SSE_HEARTBEAT_SECONDS >= 10
     assert chat.SSE_CHUNK_TIMEOUT_SECONDS >= 20
+
+
+# --- Sprint 20: token revocation is enforced at request time ------------
+
+from eiraos.api.v1 import auth as auth_mod
+from fastapi import HTTPException
+
+
+class _FakeMembershipResult:
+    def scalars(self):
+        class S:
+            def first(self):
+                class M:
+                    pass
+                return M()
+        return S()
+
+
+class _FakeUserResult:
+    def __init__(self, v):
+        self._v = v
+
+    def scalar_one_or_none(self):
+        return _FakeUser(self._v)
+
+
+class _FakeUser:
+    def __init__(self, v):
+        self.token_version = v
+
+
+class _FakeDB:
+    """Handles the two executes in get_current_active_organization."""
+    def __init__(self, db_version):
+        self._res = _FakeUserResult(db_version)
+
+    async def execute(self, stmt):
+        s = str(stmt)
+        if "organ" in s:  # OrganizationMember query -> membership present
+            return _FakeMembershipResult()
+        return self._res  # User token_version query
+
+
+def _active_org(current_user_version, db_version):
+    import asyncio
+    async def run():
+        cu = {"organization_id": 1, "user_id": 1, "token_version": current_user_version}
+        return await auth_mod.get_current_active_organization(current_user=cu, db=_FakeDB(db_version))
+    return asyncio.run(run())
+
+
+def test_revoked_token_version_rejected():
+    # DB token_version bumped (logout/rotate) differs from token -> 401 revoked
+    try:
+        _active_org(1, 2)
+        raised = False
+    except HTTPException as e:
+        raised = True
+        assert e.status_code == 401
+    assert raised
+
+
+def test_matching_token_version_accepted():
+    # token version matches DB -> not revoked, org id returned
+    assert _active_org(3, 3) == 1
