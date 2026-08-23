@@ -1,87 +1,120 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from eiraos.core.database import get_db
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization
 from eiraos.domains.conversations.models import Conversation, Message
-from eiraos.api.v1.auth import get_current_user
 
 router = APIRouter(prefix="/conversations", tags=["Conversations & History"])
 
-class ConversationCreateSchema(BaseModel):
-    title: str = Field(default="Ny Samtale")
-    organization_id: int
+class ConversationCreate(BaseModel):
+    title: str
 
-class MessageCreateSchema(BaseModel):
-    role: str = Field(..., description="user, assistant, or system")
+class ConversationResponse(BaseModel):
+    id: int
+    user_id: int
+    title: str
+    created_at: str
+    updated_at: str
+
+    class Config:
+        from_attributes = True
+
+class MessageResponse(BaseModel):
+    id: int
+    conversation_id: int
+    role: str
     content: str
-    bot_id: Optional[int] = None
-    ai_marked: bool = Field(default=False, description="EU AI Act compliance marker")
+    ai_marked: bool
+    created_at: str
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+    class Config:
+        from_attributes = True
+
+@router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
 async def create_conversation(
-    payload: ConversationCreateSchema,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    payload: ConversationCreate,
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Create a new chat conversation for the authenticated user."""
     conv = Conversation(
-        user_id=1,
-        organization_id=payload.organization_id,
+        user_id=current_user["user_id"],
         title=payload.title
     )
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
-    return {"id": conv.id, "title": conv.title, "created_at": conv.created_at}
+    return {
+        "id": conv.id,
+        "user_id": conv.user_id,
+        "title": conv.title,
+        "created_at": str(conv.created_at),
+        "updated_at": str(conv.updated_at)
+    }
 
-@router.get("")
+@router.get("", response_model=List[ConversationResponse])
 async def list_conversations(
-    organization_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """List all conversations for the tenant organization."""
-    stmt = select(Conversation).where(Conversation.organization_id == organization_id).order_by(Conversation.updated_at.desc())
+    stmt = select(Conversation).where(Conversation.user_id == current_user["user_id"]).order_by(desc(Conversation.updated_at))
     result = await db.execute(stmt)
     conversations = result.scalars().all()
-    return [{"id": c.id, "title": c.title, "created_at": c.created_at, "updated_at": c.updated_at} for c in conversations]
+    return [{
+        "id": c.id,
+        "user_id": c.user_id,
+        "title": c.title,
+        "created_at": str(c.created_at),
+        "updated_at": str(c.updated_at)
+    } for c in conversations]
 
-@router.post("/{conversation_id}/messages", status_code=status.HTTP_201_CREATED)
-async def add_message_to_conversation(
+@router.get("/{conversation_id}/messages", response_model=List[MessageResponse])
+async def get_conversation_messages(
     conversation_id: int,
-    payload: MessageCreateSchema,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Append a message (user or assistant) to a conversation history."""
-    conv_stmt = select(Conversation).where(Conversation.id == conversation_id)
-    conv_res = await db.execute(conv_stmt)
-    conv = conv_res.scalar_one_or_none()
+    conv_res = await db.execute(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user["user_id"]
+    ))
+    conv = conv_res.scalars().first()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    msg = Message(
-        conversation_id=conversation_id,
-        role=payload.role,
-        content=payload.content,
-        bot_id=payload.bot_id,
-        ai_marked=payload.ai_marked
-    )
-    db.add(msg)
-    await db.commit()
-    await db.refresh(msg)
-    return {"id": msg.id, "role": msg.role, "content": msg.content, "created_at": msg.created_at}
+    msg_stmt = select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.asc())
+    msg_res = await db.execute(msg_stmt)
+    messages = msg_res.scalars().all()
 
-@router.get("/{conversation_id}/messages")
-async def get_conversation_messages(
+    return [{
+        "id": m.id,
+        "conversation_id": m.conversation_id,
+        "role": m.role,
+        "content": m.content,
+        "ai_marked": m.ai_marked,
+        "created_at": str(m.created_at)
+    } for m in messages]
+
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
     conversation_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Retrieve full message history for a specific conversation."""
-    stmt = select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at.asc())
-    result = await db.execute(stmt)
-    messages = result.scalars().all()
-    return [{"id": m.id, "role": m.role, "content": m.content, "bot_id": m.bot_id, "ai_marked": m.ai_marked, "created_at": m.created_at} for m in messages]
+    conv_res = await db.execute(select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user["user_id"]
+    ))
+    conv = conv_res.scalars().first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    await db.delete(conv)
+    await db.commit()
+    return None
