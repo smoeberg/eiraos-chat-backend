@@ -50,7 +50,6 @@ async def _next_chunk(stream, timeout: float):
 
 async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt: str, system_prompt: str | None,
                           max_history: int = 40, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> list[dict]:
-    """Build messages without filtering by bot, preserving cross-bot history."""
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.status.in_(["completed", "cancelled"]))
@@ -109,7 +108,6 @@ def _valid_knowledge_scope(value: str | None) -> str | None:
 
 
 async def _find_verifier_bot(db: AsyncSession, primary_bot: Bot, org_id: int) -> Bot:
-    """Select another accessible/configured bot, otherwise use the primary bot."""
     candidates = (await db.execute(select(Bot).where(Bot.id != primary_bot.id).order_by(Bot.id.asc()))).scalars().all()
     for candidate in candidates:
         if not _bot_accessible(candidate, org_id) or not candidate.provider or not candidate.model:
@@ -125,7 +123,7 @@ async def _find_verifier_bot(db: AsyncSession, primary_bot: Bot, org_id: int) ->
 
 
 async def _provider_for_bot(bot: Bot, org_id: int):
-    api_key = SecretService.resolve(candidate_org_id := bot.organization_id, bot.secret_reference, None,
+    api_key = SecretService.resolve(bot.organization_id, bot.secret_reference, None,
                                     credential_scope=getattr(bot, "credential_scope", "organization") or "organization",
                                     caller_org_id=org_id)
     return AIProviderFactory.get_provider(bot.provider, api_key)
