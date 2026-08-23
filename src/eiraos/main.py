@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from prometheus_fastapi_instrumentator import Instrumentator
 import structlog
 import time
+import prometheus_client
 import redis.asyncio as aioredis
 from sqlalchemy import text
 
@@ -14,6 +15,7 @@ from eiraos.core.config import settings
 from eiraos.core.ratelimit import limiter
 from eiraos.core.database import AsyncSessionLocal
 from eiraos.api.v1.router import api_router
+from eiraos.api.v1.auth import get_current_user
 from eiraos.core.exceptions import EiraOSException
 from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware
 
@@ -89,7 +91,16 @@ async def eiraos_exception_handler(request: Request, exc: EiraOSException):
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+Instrumentator().instrument(app)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics(current_user: dict = Depends(get_current_user)):
+    """Prometheus metrics, gated behind authentication (not anonymous)."""
+    return Response(
+        content=prometheus_client.generate_latest(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 @app.get("/health/live", tags=["System"])
 async def health_live():

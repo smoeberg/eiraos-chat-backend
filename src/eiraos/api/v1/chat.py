@@ -1,7 +1,7 @@
 import json
 import asyncio
 from typing import AsyncIterator
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,8 @@ from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.domains.agents.models import Bot
 from eiraos.application.providers.factory import AIProviderFactory
 from eiraos.core.secrets import SecretService
+from eiraos.core import idempotency
+from eiraos.core.exceptions import EiraOSException
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 
@@ -27,11 +29,20 @@ class ChatCompletionRequest(BaseModel):
     bot_id: int
     prompt: str
     stream: bool = True
+    idempotency_key: str | None = None
 
 
 def _sanitize() -> str:
     """Return a generic, non-informative error string for clients."""
     return "An unexpected error occurred while processing your request."
+
+
+async def _next_chunk(stream, timeout: float):
+    """Awaits one chunk from an async iterator with a timeout; None on drain."""
+    try:
+        return await asyncio.wait_for(stream.__anext__(), timeout=timeout)
+    except StopAsyncIteration:
+        return None
 
 
 def _bot_accessible(bot: Bot, org_id: int) -> bool:
@@ -46,6 +57,7 @@ def _bot_accessible(bot: Bot, org_id: int) -> bool:
 
 @router.post("/completions")
 async def create_chat_completion(
+    request: Request,
     payload: ChatCompletionRequest,
     current_user: dict = Depends(get_current_user),
     org_id: int = Depends(get_current_active_organization),
@@ -64,6 +76,16 @@ async def create_chat_completion(
     bot = (await db.execute(bot_stmt)).scalars().first()
     if not bot or not _bot_accessible(bot, org_id):
         raise HTTPException(status_code=404, detail="Bot not found or access denied")
+
+    # Idempotency: replaying a request with the same Idempotency-Key header
+    # returns the cached result instead of re-invoking the (paid) provider.
+    idem_key = (payload.idempotency_key or "").strip() or None
+    if idem_key:
+        begin_status = await idempotency.begin_idempotency(db, request, idem_key)
+        if begin_status == "completed":
+            cached = await idempotency.read_cached_response(request, idem_key)
+            if cached is not None:
+                return json.loads(cached)
 
     user_msg = Message(
         conversation_id=conversation.id,
@@ -105,8 +127,19 @@ async def create_chat_completion(
             )
             db.add(asst_msg)
             await db.commit()
+            if idem_key:
+                await idempotency.complete_idempotency(
+                    db, request, idem_key, status.HTTP_200_OK,
+                    json.dumps({"assistant": full_response}),
+                )
             return {"role": "assistant", "content": full_response, "ai_marked": True}
+        except HTTPException:
+            raise
         except Exception:
+            if idem_key:
+                await idempotency.complete_idempotency(
+                    db, request, idem_key, status.HTTP_500_INTERNAL_SERVER_ERROR, "failed",
+                )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI provider could not fulfil the request.",
@@ -125,8 +158,11 @@ async def create_chat_completion(
             )
             try:
                 # Draining the provider stream with a per-chunk timeout so a silent
-                # upstream stalls the stream and we can fail cleanly instead of hanging.
-                async for chunk in asyncio.wait_for(stream.__anext__(), timeout=SSE_CHUNK_TIMEOUT_SECONDS):
+                # upstream stall fails the stream cleanly instead of hanging forever.
+                while True:
+                    chunk = await _next_chunk(stream, SSE_CHUNK_TIMEOUT_SECONDS)
+                    if chunk is None:
+                        break  # provider legitimately finished
                     accumulated += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                     # Emit a heartbeat if the client has not been written to recently.
