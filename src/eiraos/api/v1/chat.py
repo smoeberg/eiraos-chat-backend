@@ -19,6 +19,8 @@ router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 
 SSE_HEARTBEAT_SECONDS = 15
 SSE_CHUNK_TIMEOUT_SECONDS = 30
+_CHARS_PER_TOKEN = 4
+DEFAULT_HISTORY_TOKEN_BUDGET = 8000
 
 
 class ChatCompletionRequest(BaseModel):
@@ -27,7 +29,6 @@ class ChatCompletionRequest(BaseModel):
     bot_id: int
     prompt: str
     stream: bool = True
-    # Optional; header Idempotency-Key is authoritative (mismatch → 400)
     idempotency_key: str | None = None
 
 
@@ -47,8 +48,10 @@ async def _build_messages(
     conversation_id: int,
     current_prompt: str,
     system_prompt: str | None,
-    max_history: int = 20,
+    max_history: int = 40,
+    history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET,
 ) -> list[dict]:
+    """Build messages with system prompt and a char/token history budget."""
     stmt = (
         select(Message)
         .where(
@@ -59,14 +62,58 @@ async def _build_messages(
         .limit(max_history)
     )
     rows = list((await db.execute(stmt)).scalars().all())
-    rows.reverse()
-    messages: list[dict] = []
+
+    budget_chars = max(history_token_budget, 0) * _CHARS_PER_TOKEN
+    selected: list[dict] = []
+    used = 0
     for m in rows:
-        if m.role in ("user", "assistant", "system") and m.content:
-            messages.append({"role": m.role, "content": m.content})
+        if m.role not in ("user", "assistant", "system") or not m.content:
+            continue
+        size = len(m.content)
+        if used + size > budget_chars and selected:
+            break
+        selected.append({"role": m.role, "content": m.content})
+        used += size
+
+    selected.reverse()
+    messages: list[dict] = []
+    if system_prompt and system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.extend(selected)
     if not messages or messages[-1].get("content") != current_prompt:
         messages.append({"role": "user", "content": current_prompt})
     return messages
+
+
+async def _transition_assistant(
+    db: AsyncSession,
+    asst_id: int | None,
+    conversation_id: int,
+    bot_id: int,
+    content: str,
+    status_value: str,
+) -> None:
+    """Update the streaming row in place; insert only if no row exists."""
+    if asst_id is not None:
+        row = (
+            await db.execute(select(Message).where(Message.id == asst_id))
+        ).scalars().first()
+        if row is not None:
+            row.content = content
+            row.status = status_value
+            await db.commit()
+            return
+    db.add(
+        Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            bot_id=bot_id,
+            status=status_value,
+            ai_marked=True,
+        )
+    )
+    await db.commit()
 
 
 def _bot_accessible(bot: Bot, org_id: int) -> bool:
@@ -218,12 +265,9 @@ async def create_chat_completion(
             except asyncio.TimeoutError:
                 raise RuntimeError("provider stream timed out")
 
-            if asst_id is not None:
-                row = (await db.execute(select(Message).where(Message.id == asst_id))).scalars().first()
-                if row:
-                    row.content = accumulated
-                    row.status = "completed"
-                    await db.commit()
+            await _transition_assistant(
+                db, asst_id, conversation.id, bot.id, accumulated, "completed"
+            )
             if idem_key:
                 await idempotency.complete_idempotency(
                     db, request, idem_key, status.HTTP_200_OK,
@@ -233,31 +277,17 @@ async def create_chat_completion(
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated})}\n\n"
         except asyncio.CancelledError:
             try:
-                cancelled_msg = Message(
-                    conversation_id=conversation.id,
-                    role="assistant",
-                    content=accumulated,
-                    bot_id=bot.id,
-                    status="cancelled",
-                    ai_marked=True,
+                await _transition_assistant(
+                    db, asst_id, conversation.id, bot.id, accumulated, "cancelled"
                 )
-                db.add(cancelled_msg)
-                await db.commit()
             except Exception:
                 pass
             raise
         except Exception:
             try:
-                failed = Message(
-                    conversation_id=conversation.id,
-                    role="assistant",
-                    content=accumulated,
-                    bot_id=bot.id,
-                    status="failed",
-                    ai_marked=True,
+                await _transition_assistant(
+                    db, asst_id, conversation.id, bot.id, accumulated, "failed"
                 )
-                db.add(failed)
-                await db.commit()
             except Exception:
                 pass
             yield f"data: {json.dumps({'type': 'error', 'detail': _sanitize()})}\n\n"
