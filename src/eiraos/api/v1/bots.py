@@ -1,6 +1,6 @@
 import re
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/bots", tags=["AI Bots & Agents"])
 
 
 class BotCreateSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str
     provider: str = "openai"
     model: str = "gpt-4o"

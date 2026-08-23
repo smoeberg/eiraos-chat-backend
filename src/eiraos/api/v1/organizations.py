@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,6 +10,7 @@ from eiraos.api.v1.auth import get_current_user
 router = APIRouter(prefix="/organizations", tags=["Organizations & Multi-Tenancy"])
 
 class OrganizationCreateSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     slug: str
 

@@ -69,7 +69,12 @@ app.add_middleware(
     allow_origins=["https://app.eiraos.ai", "https://admin.eiraos.ai", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Request-ID",
+        "Idempotency-Key",
+    ],
 )
 
 @app.exception_handler(EiraOSException)

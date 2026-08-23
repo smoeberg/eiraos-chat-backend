@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any
 import json
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
@@ -27,6 +27,7 @@ MAX_SEARCH_LIMIT = 50
 
 
 class DocumentIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str = Field(..., min_length=1, max_length=MAX_TITLE_CHARS)
     content: str = Field(..., min_length=1, max_length=MAX_DOCUMENT_CHARS)
     metadata: Optional[Dict[str, Any]] = None

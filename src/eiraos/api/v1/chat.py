@@ -3,7 +3,7 @@ import asyncio
 from typing import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -25,6 +25,8 @@ SSE_CHUNK_TIMEOUT_SECONDS = 30
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     conversation_id: int
     bot_id: int
     prompt: str
