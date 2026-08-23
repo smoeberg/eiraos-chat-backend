@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import asyncio
 import uuid
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,8 @@ from passlib.context import CryptContext
 
 from eiraos.core.database import get_db
 from eiraos.core.config import settings
+from eiraos.core import ratelimit
+from eiraos.core.ratelimit import limiter
 from eiraos.domains.identity.models import User
 from eiraos.domains.organizations.models import Organization, OrganizationMember
 
@@ -92,7 +94,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register_user(payload: UserRegister, db: AsyncSession = Depends(get_db)):
+@limiter.limit(ratelimit.AUTH_REGISTER_LIMIT)
+async def register_user(request: Request, payload: UserRegister, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalars().first()
     if existing:
@@ -125,7 +128,8 @@ async def register_user(payload: UserRegister, db: AsyncSession = Depends(get_db
     return user
 
 @router.post("/login", response_model=TokenResponse)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+@limiter.limit(ratelimit.AUTH_LOGIN_LIMIT)
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where((User.email == form_data.username) | (User.username == form_data.username)))
     user = result.scalars().first()
 

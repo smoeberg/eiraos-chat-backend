@@ -2,8 +2,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from prometheus_fastapi_instrumentator import Instrumentator
 import structlog
@@ -12,6 +11,7 @@ import redis.asyncio as aioredis
 from sqlalchemy import text
 
 from eiraos.core.config import settings
+from eiraos.core.ratelimit import limiter
 from eiraos.core.database import AsyncSessionLocal
 from eiraos.api.v1.router import api_router
 from eiraos.core.exceptions import EiraOSException
@@ -25,12 +25,6 @@ structlog.configure(
     ]
 )
 logger = structlog.get_logger()
-
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["100/minute"],
-    storage_uri=settings.REDIS_URL
-)
 
 app = FastAPI(
     title="EiraOS Enterprise Chat Backend",
