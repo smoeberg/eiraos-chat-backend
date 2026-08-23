@@ -1,5 +1,6 @@
 import structlog
 import asyncio
+import arq
 
 logger = structlog.get_logger()
 
