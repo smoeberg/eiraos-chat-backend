@@ -39,7 +39,7 @@ class FakeDB:
 
 
 class FakeProvider:
-    def __init__(self, response="looks good"):
+    def __init__(self, response='{"status":"PASS","reason":"looks good"}'):
         self.response = response
         self.calls = []
 
@@ -98,6 +98,8 @@ async def test_verification_sends_original_prompt_and_primary_answer():
         model="verifier-model",
     )
     assert result.endswith(VERIFIED_BADGE)
+    assert result.verified is True
+    assert result.status == "PASS"
     assert provider.calls[0]["model"] == "verifier-model"
     messages = provider.calls[0]["messages"]
     assert "What is the answer?" in messages[0]["content"]
