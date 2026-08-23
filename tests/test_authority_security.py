@@ -39,8 +39,8 @@ def test_access_token_contains_all_required_claims(monkeypatch):
     assert payload["aud"] == TOKEN_AUDIENCE
     assert "iat" in payload
     assert "exp" in payload
-    assert "jti" in payload           # unique token id, enables revocation
-    assert "token_version" in payload  # used for revocation on logout
+    assert "jti" in payload
+    assert "token_version" in payload
     assert payload["sub"] == "soeren@example.com"
     assert payload["organization_id"] == 10
 
@@ -67,19 +67,19 @@ def test_secret_service_fails_closed_when_unresolvable(monkeypatch):
     monkeypatch.delenv("EIRAOS_PROVIDER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(HTTPException) as exc:
-        SecretService.resolve(1, "nonexistent-ref", None)
+        SecretService.resolve(1, "nonexistent-ref", None, caller_org_id=1)
     assert exc.value.status_code == 500
 
 
 def test_secret_service_returns_configured_key(monkeypatch):
     monkeypatch.setenv("EIRAOS_PROVIDER_MYKEY", "sk-abc123")
-    assert SecretService.resolve(1, "mykey", None) == "sk-abc123"
+    assert SecretService.resolve(1, "mykey", None, caller_org_id=1) == "sk-abc123"
 
 
 def test_secret_service_prefers_reference_over_default(monkeypatch):
     monkeypatch.setenv("EIRAOS_PROVIDER_SPECIAL", "sk-special")
     monkeypatch.setenv("EIRAOS_PROVIDER_API_KEY", "sk-default")
-    assert SecretService.resolve(1, "special", None) == "sk-special"
+    assert SecretService.resolve(1, "special", None, caller_org_id=1) == "sk-special"
 
 
 # --- RBAC permission mapping ----------------------------------------------
@@ -92,18 +92,14 @@ def test_owner_has_all_permissions():
 
 # --- Sprint 2: visibility reconciliation ----------------------------------
 def test_visibility_single_source_of_truth():
-    """The legacy boolean and string visibility must never diverge."""
     from eiraos.domains.agents.models import Bot
 
-    # is_public wins over a stale bot_visibility string
     a = Bot(is_public=True, bot_visibility="private")
     assert Bot.visibility(a) == "public"
 
-    # bot_visibility string used when is_public is unset/falsy
     b = Bot(is_public=False, bot_visibility="knowledge")
     assert Bot.visibility(b) == "knowledge"
 
-    # defaults to private
     c = Bot(is_public=False, bot_visibility=None)
     assert Bot.visibility(c) == "private"
 
@@ -112,7 +108,6 @@ def test_bot_create_rejects_contradictory_visibility():
     from pydantic import ValidationError
     from eiraos.api.v1.bots import BotCreateSchema
 
-    # is_public=True but bot_visibility='private' is contradictory -> reject
     try:
         BotCreateSchema(title="x", is_public=True, bot_visibility="private")
         raised = False
@@ -120,13 +115,12 @@ def test_bot_create_rejects_contradictory_visibility():
         raised = True
     assert raised
 
-    # consistent public config is accepted
     ok = BotCreateSchema(title="x", is_public=True, bot_visibility="public")
     assert ok.is_public is True
 
 
-# --- Sprint 2: SSE hardening constants -------------------------------------------   def test_sse_lifecycle_constants():
-    """SSE heartbeat/timeout windows are the values we advertise."""
+# --- Sprint 2: SSE hardening constants -------------------------------------------
+def test_sse_lifecycle_constants():
     from eiraos.api.v1 import chat
     assert chat.SSE_HEARTBEAT_SECONDS >= 10
     assert chat.SSE_CHUNK_TIMEOUT_SECONDS >= 20
@@ -168,9 +162,9 @@ class _FakeDB:
 
     async def execute(self, stmt):
         s = str(stmt)
-        if "organ" in s:  # OrganizationMember query -> membership present
+        if "organ" in s:
             return _FakeMembershipResult()
-        return self._res  # User token_version query
+        return self._res
 
 
 def _active_org(current_user_version, db_version):
@@ -182,7 +176,6 @@ def _active_org(current_user_version, db_version):
 
 
 def test_revoked_token_version_rejected():
-    # DB token_version bumped (logout/rotate) differs from token -> 401 revoked
     try:
         _active_org(1, 2)
         raised = False
@@ -193,5 +186,4 @@ def test_revoked_token_version_rejected():
 
 
 def test_matching_token_version_accepted():
-    # token version matches DB -> not revoked, org id returned
     assert _active_org(3, 3) == 1
