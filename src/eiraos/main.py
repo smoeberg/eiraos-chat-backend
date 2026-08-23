@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,7 +21,7 @@ from eiraos.core.exceptions import EiraOSException
 from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware, RequestBodyLoggingMiddleware
 from eiraos.core.logging import setup_logging
 
-setup_logging()          # single source of truth: JSON logging + PII/secret redaction
+setup_logging()
 logger = structlog.get_logger()
 
 app = FastAPI(
@@ -97,7 +98,6 @@ Instrumentator().instrument(app)
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics(current_user: dict = Depends(get_current_user)):
-    """Prometheus metrics, gated behind authentication (not anonymous)."""
     return Response(
         content=prometheus_client.generate_latest(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -110,10 +110,13 @@ async def health_live():
 @app.get("/health/ready", tags=["System"])
 async def health_ready():
     health_status = {"status": "healthy", "database": "disconnected", "redis": "disconnected"}
-    
+    _probe_timeout = 2.0
+
     try:
         async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
+            await asyncio.wait_for(
+                session.execute(text("SELECT 1")), timeout=_probe_timeout
+            )
             health_status["database"] = "connected"
     except Exception as e:
         logger.error("health_check_database_failed", error=str(e))
@@ -121,12 +124,13 @@ async def health_ready():
         health_status["database"] = "unavailable"
 
     if not settings.REDIS_URL:
-        # No Redis configured -> services falls back to in-memory rate limiting.
         health_status["redis"] = "disabled"
     else:
         try:
-            redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
-            await redis_client.ping()
+            redis_client = aioredis.from_url(
+                settings.REDIS_URL, encoding="utf-8", decode_responses=True
+            )
+            await asyncio.wait_for(redis_client.ping(), timeout=_probe_timeout)
             await redis_client.close()
             health_status["redis"] = "connected"
         except Exception as e:
@@ -134,7 +138,11 @@ async def health_ready():
             health_status["status"] = "degraded"
             health_status["redis"] = "unavailable"
 
-    status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
+    status_code = (
+        status.HTTP_200_OK
+        if health_status["status"] == "healthy"
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
     return JSONResponse(status_code=status_code, content=health_status)
 
 @app.get("/health", tags=["System"])
