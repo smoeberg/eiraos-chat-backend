@@ -25,9 +25,15 @@ async def create_organization(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Create a new tenant organization."""
+    """Create a new tenant organization and enroll the creator as owner."""
     org = Organization(name=payload.name, slug=payload.slug)
     db.add(org)
+    await db.flush()
+    db.add(OrganizationMember(
+        organization_id=org.id,
+        user_id=current_user["user_id"],
+        role="owner",
+    ))
     await db.commit()
     await db.refresh(org)
     return {"id": org.id, "name": org.name, "slug": org.slug}
@@ -37,8 +43,12 @@ async def list_organizations(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """List tenant organizations."""
-    stmt = select(Organization)
+    """List the tenant organizations the current user belongs to."""
+    stmt = (
+        select(Organization)
+        .join(OrganizationMember, OrganizationMember.organization_id == Organization.id)
+        .where(OrganizationMember.user_id == current_user["user_id"])
+    )
     result = await db.execute(stmt)
     orgs = result.scalars().all()
     return [{"id": o.id, "name": o.name, "slug": o.slug} for o in orgs]
