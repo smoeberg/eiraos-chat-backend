@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Request, HTTPException, status
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from eiraos.domains.idempotency.models import IdempotencyRecord
 
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 LEASE_SECONDS = 120
+LEASE_RENEWAL_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,30 @@ async def begin_idempotency(
         status_code=status.HTTP_409_CONFLICT,
         detail="A request with this idempotency key is already in progress.",
     )
+
+
+async def renew_idempotency_lease(
+    db: AsyncSession,
+    request: Request,
+    key: str,
+    lease_token: str,
+) -> bool:
+    """Atomically extend a lease only while this caller still owns it."""
+    org_id, user_id = await _resolve_context(request)
+    now = _utcnow()
+    result = await db.execute(
+        update(IdempotencyRecord)
+        .where(
+            IdempotencyRecord.organization_id == org_id,
+            IdempotencyRecord.user_id == user_id,
+            IdempotencyRecord.key == key,
+            IdempotencyRecord.status == "processing",
+            IdempotencyRecord.lease_token == lease_token,
+        )
+        .values(lease_until=now + timedelta(seconds=LEASE_SECONDS))
+    )
+    await db.commit()
+    return result.rowcount == 1
 
 
 async def complete_idempotency(
