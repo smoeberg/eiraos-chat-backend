@@ -18,6 +18,8 @@ router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 
 # Heartbeat keeps proxies from closing idle SSE connections.
 SSE_HEARTBEAT_SECONDS = 15
+# If the provider produces no token within this window, treat the stream as dead.
+SSE_CHUNK_TIMEOUT_SECONDS = 30
 
 
 class ChatCompletionRequest(BaseModel):
@@ -33,10 +35,13 @@ def _sanitize() -> str:
 
 
 def _bot_accessible(bot: Bot, org_id: int) -> bool:
-    """A bot is reachable if it belongs to the caller's org or is public."""
+    """A bot is reachable if it belongs to the caller's org or is public.
+
+    Uses Bot.visibility (single source of truth) rather than the legacy boolean.
+    """
     if bot.organization_id is not None and bot.organization_id == org_id:
         return True
-    return bot.bot_visibility == "public"
+    return Bot.visibility(bot) == "public"
 
 
 @router.post("/completions")
@@ -107,20 +112,32 @@ async def create_chat_completion(
                 detail="AI provider could not fulfil the request.",
             )
 
-    # ---- streaming SSE with message lifecycle + heartbeat ----
+    # ---- streaming SSE with message lifecycle + heartbeat + timeout + disconnect handling ----
     async def event_generator() -> AsyncIterator[str]:
         accumulated = ""
+        last_heartbeat = asyncio.get_event_loop().time()
         try:
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id})}\n\n"
-            loop = asyncio.get_event_loop()
-            async for chunk in provider.stream_chat_completion(
+            stream = provider.stream_chat_completion(
                 model=bot.model,
                 messages=[{"role": "user", "content": payload.prompt}],
                 system_prompt=bot.system_prompt,
-            ):
-                accumulated += chunk
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
-                # periodic heartbeat (minimum once every N seconds)
+            )
+            try:
+                # Draining the provider stream with a per-chunk timeout so a silent
+                # upstream stalls the stream and we can fail cleanly instead of hanging.
+                async for chunk in asyncio.wait_for(stream.__anext__(), timeout=SSE_CHUNK_TIMEOUT_SECONDS):
+                    accumulated += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+                    # Emit a heartbeat if the client has not been written to recently.
+                    now = asyncio.get_event_loop().time()
+                    if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+                        yield ": keep-alive\n\n"
+                        last_heartbeat = now
+            except asyncio.TimeoutError:
+                # No provider output for the full window: fail the stream explicitly.
+                raise RuntimeError("provider stream timed out")
+
             # Save completed assistant message
             asst = Message(
                 conversation_id=conversation.id,
@@ -133,6 +150,23 @@ async def create_chat_completion(
             db.add(asst)
             await db.commit()
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated})}\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream: persist the partial transcript so
+            # nothing is silently lost, then stop generating cleanly.
+            try:
+                interrupted = Message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=accumulated,
+                    bot_id=bot.id,
+                    status="interrupted",
+                    ai_marked=True,
+                )
+                db.add(interrupted)
+                await db.commit()
+            except Exception:
+                pass
+            raise
         except Exception:
             # Persist a failed assistant message rather than silently dropping it.
             try:

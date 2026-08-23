@@ -20,6 +20,18 @@ class Bot(Base):
     tool_scope = Column(String, nullable=False, default="standard") # restricted | standard | elevated
     
     # Secret reference instead of raw plaintext key
+    # Secret reference instead of raw plaintext key
     secret_reference = Column(String, nullable=True)
     is_public = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
+
+    @classmethod
+    def visibility(cls, bot: "Bot") -> str:
+        """Single source of truth for bot visibility.
+
+        Reconciles the legacy boolean `is_public` with the modern string
+        `bot_visibility` so the two columns can never silently diverge.
+        """
+        if bot.is_public:
+            return "public"
+        return bot.bot_visibility or "private"

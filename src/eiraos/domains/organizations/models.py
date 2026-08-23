@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from eiraos.core.database import Base
@@ -17,9 +17,9 @@ class OrganizationMember(Base):
     __tablename__ = "organization_members"
 
     id = Column(Integer, primary_key=True, index=True)
-    organization_id = Column(Integer, nullable=False, index=True)
-    user_id = Column(Integer, nullable=False, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String, default="member", nullable=False) # owner, admin, member
     created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
 
-    organization = relationship("Organization", back_populates="members", foreign_keys=[organization_id], viewonly=True)
+    organization = relationship("Organization", back_populates="members")

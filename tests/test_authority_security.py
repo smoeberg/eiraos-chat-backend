@@ -88,3 +88,45 @@ def test_owner_has_all_permissions():
     assert "bot:delete" in ROLE_PERMISSIONS.get("owner", [])
     assert "organization:update" in ROLE_PERMISSIONS.get("owner", [])
     assert "conversation:delete" in ROLE_PERMISSIONS.get("owner", [])
+
+
+# --- Sprint 2: visibility reconciliation ----------------------------------
+def test_visibility_single_source_of_truth():
+    """The legacy boolean and string visibility must never diverge."""
+    from eiraos.domains.agents.models import Bot
+
+    # is_public wins over a stale bot_visibility string
+    a = Bot(is_public=True, bot_visibility="private")
+    assert Bot.visibility(a) == "public"
+
+    # bot_visibility string used when is_public is unset/falsy
+    b = Bot(is_public=False, bot_visibility="knowledge")
+    assert Bot.visibility(b) == "knowledge"
+
+    # defaults to private
+    c = Bot(is_public=False, bot_visibility=None)
+    assert Bot.visibility(c) == "private"
+
+
+def test_bot_create_rejects_contradictory_visibility():
+    from pydantic import ValidationError
+    from eiraos.api.v1.bots import BotCreateSchema
+
+    # is_public=True but bot_visibility='private' is contradictory -> reject
+    try:
+        BotCreateSchema(title="x", is_public=True, bot_visibility="private")
+        raised = False
+    except ValidationError:
+        raised = True
+    assert raised
+
+    # consistent public config is accepted
+    ok = BotCreateSchema(title="x", is_public=True, bot_visibility="public")
+    assert ok.is_public is True
+
+
+# --- Sprint 2: SSE hardening constants -------------------------------------------   def test_sse_lifecycle_constants():
+    """SSE heartbeat/timeout windows are the values we advertise."""
+    from eiraos.api.v1 import chat
+    assert chat.SSE_HEARTBEAT_SECONDS >= 10
+    assert chat.SSE_CHUNK_TIMEOUT_SECONDS >= 20

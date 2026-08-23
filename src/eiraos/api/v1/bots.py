@@ -1,13 +1,15 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from eiraos.core.database import get_db
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.agents.models import Bot
 
 router = APIRouter(prefix="/bots", tags=["AI Bots & Agents"])
+
 
 class BotCreateSchema(BaseModel):
     title: str
@@ -17,6 +19,16 @@ class BotCreateSchema(BaseModel):
     bot_visibility: str = "organization"
     knowledge_visibility: str = "organization"
     is_public: bool = False
+
+    @field_validator("is_public")
+    @classmethod
+    def _public_must_match_visibility(cls, is_public: bool, info):
+        vis = info.data.get("bot_visibility", "organization")
+        if is_public and vis != "public":
+            raise ValueError("is_public=True requires bot_visibility='public'")
+        if not is_public and vis == "public":
+            raise ValueError("bot_visibility='public' requires is_public=True")
+        return is_public
 
 class BotResponseSchema(BaseModel):
     id: int
@@ -70,8 +82,11 @@ async def list_bots(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
+    # Public bots are reachable across orgs; private/org bots are scoped.
     stmt = select(Bot).where(
-        (Bot.organization_id == org_id) | (Bot.bot_visibility == "public") | (Bot.is_public == True)
+        (Bot.organization_id == org_id)
+        | (Bot.is_public == True)
+        | (Bot.bot_visibility == "public")
     )
     result = await db.execute(stmt)
     bots = result.scalars().all()
