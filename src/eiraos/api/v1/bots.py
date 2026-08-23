@@ -4,44 +4,46 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from eiraos.core.database import get_db
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization
 from eiraos.domains.agents.models import Bot
-from eiraos.api.v1.auth import get_current_user
 
-router = APIRouter(prefix="/bots", tags=["AI Agents & Bots"])
+router = APIRouter(prefix="/bots", tags=["AI Bots & Agents"])
 
 class BotCreateSchema(BaseModel):
-    bot_key: str = Field(..., description="Unique slug/key for the bot")
-    provider: str = Field(default="openai", description="openai, anthropic, azure, etc.")
     name: str
-    endpoint: Optional[str] = None
-    model: str = Field(default="gpt-4o-mini")
+    provider: str = "openai"
+    model: str = "gpt-4o"
+    description: Optional[str] = None
     api_key: Optional[str] = None
-    system_prompt: Optional[str] = None
-    is_public: bool = Field(default=True)
+    is_public: bool = True
 
 class BotResponseSchema(BaseModel):
     id: int
-    bot_key: str
-    provider: str
+    organization_id: int
     name: str
+    provider: str
     model: str
+    description: Optional[str] = None
     is_public: bool
+    created_at: str
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=BotResponseSchema)
+    class Config:
+        from_attributes = True
+
+@router.post("", response_model=BotResponseSchema, status_code=status.HTTP_201_CREATED)
 async def create_bot(
     payload: BotCreateSchema,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Register a new AI bot/agent configuration."""
     bot = Bot(
-        bot_key=payload.bot_key,
-        provider=payload.provider,
+        organization_id=org_id,
         name=payload.name,
-        endpoint=payload.endpoint,
+        provider=payload.provider,
         model=payload.model,
+        description=payload.description,
         api_key=payload.api_key,
-        system_prompt=payload.system_prompt,
         is_public=payload.is_public
     )
     db.add(bot)
@@ -49,30 +51,33 @@ async def create_bot(
     await db.refresh(bot)
     return {
         "id": bot.id,
-        "bot_key": bot.bot_key,
-        "provider": bot.provider,
+        "organization_id": bot.organization_id,
         "name": bot.name,
+        "provider": bot.provider,
         "model": bot.model,
-        "is_public": bot.is_public
+        "description": bot.description,
+        "is_public": bot.is_public,
+        "created_at": str(bot.created_at)
     }
 
 @router.get("", response_model=List[BotResponseSchema])
 async def list_bots(
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
-    """List all available AI bots and agents."""
-    stmt = select(Bot)
+    stmt = select(Bot).where(
+        (Bot.organization_id == org_id) | (Bot.is_public == True)
+    )
     result = await db.execute(stmt)
     bots = result.scalars().all()
-    return [
-        {
-            "id": b.id,
-            "bot_key": b.bot_key,
-            "provider": b.provider,
-            "name": b.name,
-            "model": b.model,
-            "is_public": b.is_public
-        }
-        for b in bots
-    ]
+    return [{
+        "id": b.id,
+        "organization_id": b.organization_id,
+        "name": b.name,
+        "provider": b.provider,
+        "model": b.model,
+        "description": b.description,
+        "is_public": b.is_public,
+        "created_at": str(b.created_at)
+    } for b in bots]

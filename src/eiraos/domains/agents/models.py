@@ -1,18 +1,16 @@
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, text
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, DateTime
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 from eiraos.core.database import Base
 
 class Bot(Base):
     __tablename__ = "bots"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    bot_key: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False) # openai, anthropic, gemini
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    model: Mapped[str] = mapped_column(String(100), nullable=False)
-    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-
-    messages = relationship("Message", back_populates="bot")
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(Integer, nullable=False, index=True, server_default="1")
+    name = Column(String, nullable=False)
+    provider = Column(String, nullable=False, default="openai")
+    model = Column(String, nullable=False, default="gpt-4o")
+    description = Column(Text, nullable=True)
+    api_key = Column(String, nullable=True)
+    is_public = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))

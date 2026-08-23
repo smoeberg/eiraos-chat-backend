@@ -15,6 +15,7 @@ class ConversationCreate(BaseModel):
 class ConversationResponse(BaseModel):
     id: int
     user_id: int
+    organization_id: int
     title: str
     created_at: str
     updated_at: str
@@ -42,6 +43,7 @@ async def create_conversation(
 ):
     conv = Conversation(
         user_id=current_user["user_id"],
+        organization_id=org_id,
         title=payload.title
     )
     db.add(conv)
@@ -50,6 +52,7 @@ async def create_conversation(
     return {
         "id": conv.id,
         "user_id": conv.user_id,
+        "organization_id": conv.organization_id,
         "title": conv.title,
         "created_at": str(conv.created_at),
         "updated_at": str(conv.updated_at)
@@ -61,12 +64,16 @@ async def list_conversations(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
-    stmt = select(Conversation).where(Conversation.user_id == current_user["user_id"]).order_by(desc(Conversation.updated_at))
+    stmt = select(Conversation).where(
+        Conversation.organization_id == org_id,
+        Conversation.user_id == current_user["user_id"]
+    ).order_by(desc(Conversation.updated_at))
     result = await db.execute(stmt)
     conversations = result.scalars().all()
     return [{
         "id": c.id,
         "user_id": c.user_id,
+        "organization_id": c.organization_id,
         "title": c.title,
         "created_at": str(c.created_at),
         "updated_at": str(c.updated_at)
@@ -81,6 +88,7 @@ async def get_conversation_messages(
 ):
     conv_res = await db.execute(select(Conversation).where(
         Conversation.id == conversation_id,
+        Conversation.organization_id == org_id,
         Conversation.user_id == current_user["user_id"]
     ))
     conv = conv_res.scalars().first()
@@ -109,6 +117,7 @@ async def delete_conversation(
 ):
     conv_res = await db.execute(select(Conversation).where(
         Conversation.id == conversation_id,
+        Conversation.organization_id == org_id,
         Conversation.user_id == current_user["user_id"]
     ))
     conv = conv_res.scalars().first()

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from eiraos.core.database import get_db
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization
 from eiraos.application.providers.factory import AIProviderFactory
-from eiraos.domains.bots.models import Bot
+from eiraos.domains.agents.models import Bot
 from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.core.config import settings
 
@@ -32,29 +32,31 @@ async def create_chat_completion(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Execute AI chat completion or SSE stream, persisting messages and utilizing bot configuration.
-    """
     model = "gpt-4o"
     provider_name = "openai"
     api_key = settings.OPENAI_API_KEY
     system_prompt = "You are EiraOS, a helpful, secure enterprise AI assistant."
 
     if payload.bot_id:
-        bot_res = await db.execute(select(Bot).where(Bot.id == payload.bot_id))
+        bot_res = await db.execute(select(Bot).where(
+            Bot.id == payload.bot_id,
+            (Bot.organization_id == org_id) | (Bot.is_public == True)
+        ))
         bot = bot_res.scalars().first()
-        if bot:
-            model = bot.model
-            provider_name = bot.provider.lower()
-            if bot.api_key:
-                api_key = bot.api_key
-            if bot.description:
-                system_prompt = bot.description
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot not found or access denied")
+        model = bot.model
+        provider_name = bot.provider.lower()
+        if bot.api_key:
+            api_key = bot.api_key
+        if bot.description:
+            system_prompt = bot.description
 
     conversation_id = payload.conversation_id
     if conversation_id:
         conv_res = await db.execute(select(Conversation).where(
             Conversation.id == conversation_id,
+            Conversation.organization_id == org_id,
             Conversation.user_id == current_user["user_id"]
         ))
         conv = conv_res.scalars().first()
@@ -64,6 +66,7 @@ async def create_chat_completion(
         title_summary = payload.messages[-1].content[:30] if payload.messages else "New Chat"
         conv = Conversation(
             user_id=current_user["user_id"],
+            organization_id=org_id,
             title=title_summary
         )
         db.add(conv)
@@ -142,6 +145,6 @@ async def create_chat_completion(
                     persist_db.add(assistant_msg_db)
                     await persist_db.commit()
         except Exception as err:
-            yield f"data: [ERROR: {str(err)}]\n\n"
+            yield f"data: [ERROR: AI Stream Exception]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
