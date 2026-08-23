@@ -44,6 +44,7 @@ async def enqueue_document_ingestion(
     document_id: int,
     organization_id: int,
     content: str,
+    knowledge_scope: str = "organization",
 ) -> str | None:
     """Enqueue document processing. Returns job id or None if queue unavailable."""
     pool = await get_arq_pool()
@@ -54,5 +55,6 @@ async def enqueue_document_ingestion(
         document_id,
         organization_id,
         content,
+        knowledge_scope,
     )
     return job.job_id if job else None

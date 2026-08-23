@@ -1,18 +1,12 @@
-"""Sprint 3: endpoint authorization matrix + RAG chunking safety.
-
-Verifies every registered write route carries an authorization dependency,
-auth identity endpoints are brute-force rate-limited, and RAG chunking is
-stable/pure (no infra).
-"""
+"""Endpoint authorization matrix and RAG safety checks."""
 import importlib
 
 API_MODULES = [
-    "bots", "chat", "documents", "conversations", "organizations", "auth",
+    "bots", "chat", "documents", "document_upload", "conversations", "organizations", "auth",
 ]
 
 
 def _all_api_routes():
-    """Yield (method, path, route) for every route in every v1 router."""
     for mod in API_MODULES:
         m = importlib.import_module(f"eiraos.api.v1.{mod}")
         router = getattr(m, "router")
@@ -38,10 +32,9 @@ def test_no_write_route_is_anonymous():
         if method not in ("POST", "PUT", "PATCH", "DELETE"):
             continue
         if "/auth/register" in path or "/auth/login" in path:
-            continue  # intentionally public pre-auth endpoints
+            continue
         names = _dependency_names(route)
-        if not names & {"get_current_user", "require_permission.<locals>.permission_dependency",
-                        "get_current_active_organization"}:
+        if not names & {"get_current_user", "require_permission.<locals>.permission_dependency", "get_current_active_organization"}:
             anonymous.append((method, path))
     assert anonymous == [], f"anonymous write routes: {anonymous}"
 
@@ -52,8 +45,7 @@ def test_all_endpoints_are_authenticated_or_auth_preflight():
         if "/auth/register" in path or "/auth/login" in path:
             continue
         names = _dependency_names(route)
-        if not names & {"get_current_user", "require_permission.<locals>.permission_dependency",
-                        "get_current_active_organization"}:
+        if not names & {"get_current_user", "require_permission.<locals>.permission_dependency", "get_current_active_organization"}:
             unauthed.append((method, path))
     assert unauthed == [], f"unauthenticated endpoints: {unauthed}"
 
@@ -68,14 +60,19 @@ def test_mutating_bot_routes_require_permission():
     assert dirty == [], f"bot mutations missing permission: {dirty}"
 
 
+def test_document_upload_requires_permission():
+    matches = [route for method, path, route in _all_api_routes() if method == "POST" and path == "/documents/upload"]
+    assert len(matches) == 1
+    assert any("permission_dependency" in n for n in _dependency_names(matches[0]))
+
+
 def test_auth_identity_routes_are_brute_force_limited():
-    # limiter.limit() wraps the endpoint; the wrapper exposes __wrapped__.
     limited = {}
     for method, path, route in _all_api_routes():
         if "auth/" in path and method == "POST":
             limited[path] = hasattr(route.endpoint, "__wrapped__")
-    assert limited.get("/auth/login") is True, "login must be rate-limited"
-    assert limited.get("/auth/register") is True, "register must be rate-limited"
+    assert limited.get("/auth/login") is True
+    assert limited.get("/auth/register") is True
 
 
 def test_rate_limit_constants_are_production_sane():

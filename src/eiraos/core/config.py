@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
     # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False
+    STORAGE_ROOT: str = "storage/uploads"
     OPENAI_API_KEY: Optional[str] = "sk-placeholder"
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
