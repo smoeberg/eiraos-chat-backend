@@ -14,8 +14,8 @@ from eiraos.core.config import settings
 from eiraos.core.database import AsyncSessionLocal
 from eiraos.api.v1.router import api_router
 from eiraos.core.exceptions import EiraOSException
+from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware
 
-# Configure structured JSON logging
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
@@ -25,7 +25,6 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
-# Redis-backed SlowAPI rate limiter
 limiter = Limiter(
     key_func=get_remote_address,
     default_limits=["100/minute"],
@@ -42,29 +41,19 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Secure CORS Middleware (explicit origins or allow_credentials=False for wildcard)
+# Register custom middlewares
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(TenantIsolationMiddleware)
+app.add_middleware(RequestTracingMiddleware)
+
+# Secure CORS Middleware (explicit origins only)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://app.eiraos.ai"],
+    allow_origins=["https://app.eiraos.ai", "https://admin.eiraos.ai"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Request Tracing & Structured Logging Middleware
-@app.middleware("http")
-async def request_logging_middleware(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    duration = time.time() - start_time
-    logger.info(
-        "http_request",
-        method=request.method,
-        path=request.url.path,
-        status_code=response.status_code,
-        duration_sec=round(duration, 4)
-    )
-    return response
 
 # Global Exception Handlers
 @app.exception_handler(EiraOSException)
@@ -80,10 +69,8 @@ async def eiraos_exception_handler(request: Request, exc: EiraOSException):
         }
     )
 
-# Include API v1 Router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# Prometheus instrumentation
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 @app.get("/health/live", tags=["System"])
@@ -100,7 +87,7 @@ async def health_ready():
             health_status["database"] = "connected"
     except Exception as e:
         health_status["status"] = "degraded"
-        health_status["database_error"] = str(e)
+        # Sanitized: do not leak exception text/stack trace to client
 
     try:
         redis_client = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
@@ -109,7 +96,7 @@ async def health_ready():
         health_status["redis"] = "connected"
     except Exception as e:
         health_status["status"] = "degraded"
-        health_status["redis_error"] = str(e)
+        # Sanitized: do not leak exception text/stack trace to client
 
     status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=status_code, content=health_status)

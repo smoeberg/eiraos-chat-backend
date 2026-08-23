@@ -11,7 +11,7 @@ from passlib.context import CryptContext
 from eiraos.core.database import get_db
 from eiraos.core.config import settings
 from eiraos.domains.identity.models import User
-from eiraos.domains.organizations.models import OrganizationMember
+from eiraos.domains.organizations.models import Organization, OrganizationMember
 
 router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 
@@ -63,6 +63,20 @@ async def register_user(payload: UserRegister, db: AsyncSession = Depends(get_db
         is_enabled=True
     )
     db.add(user)
+    await db.flush() # Flush to get user.id
+
+    # Automatically create a default organization for the new user (Fail-Closed, zero orphaned users)
+    org_name = f"{payload.email.split('@')[0]}'s Organization"
+    org = Organization(name=org_name, slug=org_name.lower().replace(" ", "-"))
+    db.add(org)
+    await db.flush()
+
+    membership = OrganizationMember(
+        organization_id=org.id,
+        user_id=user.id,
+        role="owner"
+    )
+    db.add(membership)
     await db.commit()
     await db.refresh(user)
     return user
@@ -75,20 +89,21 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
     if not user or not user.is_enabled or not user.password_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
-    # Strict bcrypt verification (NO plaintext fallback)
     if not verify_password(form_data.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
-    # Fetch default organization membership
+    # Fetch organization membership (Fail-Closed: no default organization 1 fallback)
     org_res = await db.execute(select(OrganizationMember).where(OrganizationMember.user_id == user.id))
     membership = org_res.scalars().first()
-    org_id = membership.organization_id if membership else 1
+    
+    if not membership:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User has no organization membership")
 
     access_token = create_access_token(data={
         "sub": user.email,
         "user_id": user.id,
         "role": user.role,
-        "organization_id": org_id
+        "organization_id": membership.organization_id
     })
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -103,9 +118,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         email: str = payload.get("sub")
         user_id: int = payload.get("user_id")
         role: str = payload.get("role", "member")
-        org_id: int = payload.get("organization_id", 1)
+        org_id: int = payload.get("organization_id")
 
-        if not email or not user_id:
+        if not email or not user_id or not org_id:
             raise credentials_exception
         return {"email": email, "user_id": user_id, "role": role, "organization_id": org_id}
     except jwt.PyJWTError:

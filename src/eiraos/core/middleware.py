@@ -19,16 +19,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 class TenantIsolationMiddleware(BaseHTTPMiddleware):
     """
-    Ensures multi-tenant isolation by extracting and validating organization context.
-    Prevents header spoofing by optionally verifying against JWT token claims or database membership.
+    Enforces multi-tenant isolation by extracting verified organization context from JWT.
+    Header fallback is completely removed to prevent IDOR and header spoofing.
     """
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json", "/metrics", "/api/v1/auth/login"]:
+        if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json", "/metrics", "/api/v1/auth/login", "/api/v1/auth/register"]:
             return await call_next(request)
 
-        org_id_header = request.headers.get("X-Organization-ID")
-        
-        # Also check authorization header for tenant claims if present
         auth_header = request.headers.get("Authorization")
         token_org_id = None
         if auth_header and auth_header.startswith("Bearer "):
@@ -40,13 +37,7 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
                 pass
 
         if token_org_id:
-            # Enforce tenant from verified token claim if available
             request.state.organization_id = int(token_org_id)
-        elif org_id_header:
-            try:
-                request.state.organization_id = int(org_id_header)
-            except ValueError:
-                return Response(content='{"detail": "Invalid X-Organization-ID header format"}', status_code=400, media_type="application/json")
         else:
             request.state.organization_id = None
 
