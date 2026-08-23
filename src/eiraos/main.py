@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -40,7 +41,6 @@ app = FastAPI(
 
 app.state.limiter = limiter
 
-# Custom Rate Limit Exceeded handler returning RFC 7807 format
 @app.exception_handler(RateLimitExceeded)
 async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
@@ -50,6 +50,20 @@ async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
             "title": "Rate Limit Exceeded",
             "status": 429,
             "detail": "Too many requests. Please slow down.",
+            "instance": request.url.path
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "type": "about:blank",
+            "title": "Validation Error",
+            "status": 422,
+            "detail": "Request validation failed",
+            "errors": exc.errors(),
             "instance": request.url.path
         }
     )
