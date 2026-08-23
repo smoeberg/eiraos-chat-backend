@@ -30,7 +30,27 @@ class RequestTracingMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
-        
+
         response: Response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        return response
+
+
+class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
+    """Capture the raw request body and stash it for idempotency hashing.
+
+    Idempotency (``core.idempotency._body_digest``) digests
+    ``request.state.cached_body`` to detect payload replays. Without this
+    middleware, that attribute never gets set and idempotency crashes.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        body = await request.body()
+        request.state.cached_body = body
+        # Rebuild the stream so downstream readers still see the original body.
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._receive = receive
+        response: Response = await call_next(request)
         return response

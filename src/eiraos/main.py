@@ -17,7 +17,7 @@ from eiraos.core.database import AsyncSessionLocal
 from eiraos.api.v1.router import api_router
 from eiraos.api.v1.auth import get_current_user
 from eiraos.core.exceptions import EiraOSException
-from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware
+from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware, RequestBodyLoggingMiddleware
 from eiraos.core.logging import setup_logging
 
 setup_logging()          # single source of truth: JSON logging + PII/secret redaction
@@ -62,6 +62,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TenantIsolationMiddleware)
 app.add_middleware(RequestTracingMiddleware)
+app.add_middleware(RequestBodyLoggingMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

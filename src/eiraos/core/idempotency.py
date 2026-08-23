@@ -28,7 +28,7 @@ DEFAULT_TTL_SECONDS = 24 * 60 * 60  # 24h
 
 
 def _body_digest(request: Request) -> str:
-    raw = request.state.cached_body
+    raw = getattr(request.state, "cached_body", None)
     if raw is not None:
         return hashlib.sha256(raw).hexdigest()
     return ""  # GET-ish request without a meaningful body
