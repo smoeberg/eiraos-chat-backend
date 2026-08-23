@@ -14,7 +14,7 @@ from eiraos.domains.agents.models import Bot
 from eiraos.domains.documents.rag_service import RAGService
 from eiraos.api.v1.documents import generate_embedding
 from eiraos.application.providers.factory import AIProviderFactory
-from eiraos.application.business_features import verify_answer, VERIFIED_BADGE, build_knowledge_system_context
+from eiraos.application.business_features import verify_answer, build_knowledge_system_context
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
 
@@ -50,12 +50,9 @@ async def _next_chunk(stream, timeout: float):
 
 async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt: str, system_prompt: str | None,
                           max_history: int = 40, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> list[dict]:
-    stmt = (
-        select(Message)
-        .where(Message.conversation_id == conversation_id, Message.status.in_(["completed", "cancelled"]))
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(max_history)
-    )
+    stmt = (select(Message).where(Message.conversation_id == conversation_id,
+                                  Message.status.in_(["completed", "cancelled"]))
+            .order_by(Message.created_at.desc(), Message.id.desc()).limit(max_history))
     rows = list((await db.execute(stmt)).scalars().all())
     budget_chars = max(history_token_budget, 0) * _CHARS_PER_TOKEN
     selected: list[dict] = []
@@ -133,10 +130,8 @@ async def _knowledge_context(db: AsyncSession, org_id: int, prompt: str, knowled
     if not knowledge_scope:
         return None
     query_embedding = await generate_embedding(prompt)
-    results = await RAGService.hybrid_search(
-        db=db, organization_id=org_id, query_embedding=query_embedding,
-        query_text=prompt, limit=6, knowledge_scope=knowledge_scope,
-    )
+    results = await RAGService.hybrid_search(db=db, organization_id=org_id, query_embedding=query_embedding,
+                                              query_text=prompt, limit=6, knowledge_scope=knowledge_scope)
     return build_knowledge_system_context(results)
 
 
@@ -150,12 +145,11 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                                  current_user: dict = Depends(get_current_user),
                                  org_id: int = Depends(get_current_active_organization),
                                  db: AsyncSession = Depends(get_db)):
-    conv_stmt = select(Conversation).where(
+    conversation = (await db.execute(select(Conversation).where(
         Conversation.id == payload.conversation_id,
         Conversation.organization_id == org_id,
         Conversation.user_id == current_user["user_id"],
-    )
-    conversation = (await db.execute(conv_stmt)).scalars().first()
+    ))).scalars().first()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found or access denied")
 
@@ -193,19 +187,26 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             full_response = await provider.generate_chat_completion(model=bot.model, messages=provider_messages,
                                                                      system_prompt=effective_system_prompt)
             verified = False
+            verification_status = None
+            verification_reason = None
             if payload.verify:
                 verifier_bot = await _find_verifier_bot(db, bot, org_id)
                 verifier = await _provider_for_bot(verifier_bot, org_id)
-                full_response = await verify_answer(primary_answer=full_response, original_prompt=payload.prompt,
-                                                    verifier=verifier, model=verifier_bot.model)
-                verified = True
+                result = await verify_answer(primary_answer=full_response, original_prompt=payload.prompt,
+                                             verifier=verifier, model=verifier_bot.model)
+                full_response = result.answer
+                verified = result.verified
+                verification_status = result.status
+                verification_reason = result.reason
             db.add(Message(conversation_id=conversation.id, role="assistant", content=full_response, bot_id=bot.id,
                            status="completed", ai_marked=True))
             await db.commit()
             if idem_key:
                 await idempotency.complete_idempotency(db, request, idem_key, status.HTTP_200_OK,
                                                        json.dumps({"assistant": full_response}), lease_token=lease_token)
-            return {"role": "assistant", "content": full_response, "ai_marked": True, "verified": verified}
+            return {"role": "assistant", "content": full_response, "ai_marked": True,
+                    "verified": verified, "verification_status": verification_status,
+                    "verification_reason": verification_reason}
         except HTTPException:
             raise
         except Exception:
@@ -244,19 +245,24 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 raise RuntimeError("provider stream timed out")
 
             verified = False
+            verification_status = None
+            verification_reason = None
             if payload.verify:
                 verifier_bot = await _find_verifier_bot(db, bot, org_id)
                 verifier = await _provider_for_bot(verifier_bot, org_id)
-                accumulated = await verify_answer(primary_answer=accumulated, original_prompt=payload.prompt,
-                                                 verifier=verifier, model=verifier_bot.model)
-                verified = True
-                yield f"data: {json.dumps({'type': 'verified', 'badge': VERIFIED_BADGE})}\n\n"
+                result = await verify_answer(primary_answer=accumulated, original_prompt=payload.prompt,
+                                             verifier=verifier, model=verifier_bot.model)
+                accumulated = result.answer
+                verified = result.verified
+                verification_status = result.status
+                verification_reason = result.reason
+                yield f"data: {json.dumps({'type': 'verification', 'status': verification_status, 'verified': verified, 'reason': verification_reason})}\n\n"
 
             await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "completed")
             if idem_key:
                 await idempotency.complete_idempotency(db, request, idem_key, 200,
                                                        json.dumps({"assistant": accumulated}), lease_token=lease_token)
-            yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified, 'verification_status': verification_status, 'verification_reason': verification_reason})}\n\n"
         except asyncio.CancelledError:
             try:
                 await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "cancelled")
