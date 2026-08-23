@@ -81,6 +81,14 @@ async def _stop_lease_heartbeat(task, lost: asyncio.Event | None) -> bool:
     return not lost.is_set() if lost is not None else True
 
 
+async def _release_preflight_lease(db: AsyncSession, request: Request, idem_key: str | None,
+                                   lease_token: str | None, status_code: int) -> None:
+    if idem_key and lease_token:
+        await idempotency.complete_idempotency(
+            db, request, idem_key, status_code, "failed", lease_token=lease_token
+        )
+
+
 async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt: str, system_prompt: str | None,
                           max_history: int = 40, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> list[dict]:
     stmt = (select(Message).where(Message.conversation_id == conversation_id,
@@ -219,10 +227,14 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         knowledge_context = await _knowledge_context(db, org_id, payload.prompt, knowledge_scope)
         effective_system_prompt = _combined_system_prompt(bot.system_prompt, knowledge_context)
         provider_messages = await _build_messages(db, conversation.id, payload.prompt, effective_system_prompt)
-    except HTTPException:
+    except HTTPException as exc:
+        if idem_key and lease_token:
+            await _release_preflight_lease(db, request, idem_key, lease_token, exc.status_code)
         raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="AI provider could not be initialized.")
+    except Exception as exc:
+        if idem_key and lease_token:
+            await _release_preflight_lease(db, request, idem_key, lease_token, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        raise HTTPException(status_code=500, detail="AI provider could not be initialized.") from exc
 
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
