@@ -136,6 +136,16 @@ def _bot_accessible(bot: Bot, org_id: int) -> bool:
     return Bot.visibility(bot) == "public"
 
 
+def _verifier_bot_accessible(bot: Bot, org_id: int) -> bool:
+    """Verification is a privileged server-side operation and is tenant-bound.
+
+    Unlike normal chat access, a public bot belonging to another organization
+    must never be selected as a verifier. This prevents cross-organization
+    credential/context use through the automatic verifier selection path.
+    """
+    return bot.organization_id == org_id
+
+
 def _valid_knowledge_scope(value: str | None) -> str | None:
     if value is None:
         return None
@@ -148,7 +158,7 @@ def _valid_knowledge_scope(value: str | None) -> str | None:
 async def _find_verifier_bot(db: AsyncSession, primary_bot: Bot, org_id: int) -> Bot:
     candidates = (await db.execute(select(Bot).where(Bot.id != primary_bot.id).order_by(Bot.id.asc()))).scalars().all()
     for candidate in candidates:
-        if not _bot_accessible(candidate, org_id) or not candidate.provider or not candidate.model:
+        if not _verifier_bot_accessible(candidate, org_id) or not candidate.provider or not candidate.model:
             continue
         try:
             SecretService.resolve(candidate.organization_id, candidate.secret_reference, None,
