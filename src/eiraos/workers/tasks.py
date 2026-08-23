@@ -36,7 +36,7 @@ async def _embed(text_content: str) -> list[float] | None:
         return None
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+            resp = await httpx.AsyncClient(timeout=30.0).post(
                 "https://api.openai.com/v1/embeddings",
                 headers={
                     "Authorization": f"Bearer {key}",
@@ -52,7 +52,8 @@ async def _embed(text_content: str) -> list[float] | None:
 
 
 async def process_document_ingestion(
-    ctx, document_id: int, organization_id: int, content: str
+    ctx, document_id: int, organization_id: int, content: str,
+    knowledge_scope: str = "organization",
 ):
     """Document lifecycle: queued -> processing -> ready | failed."""
     logger.info("document_ingestion_start", document_id=document_id, org_id=organization_id)
@@ -72,7 +73,14 @@ async def process_document_ingestion(
             embedded = 0
             for position, chunk_text in enumerate(chunks):
                 emb = await _embed(chunk_text)
-                meta = json.dumps({"order": position, "title": doc.title}, ensure_ascii=False)
+                meta = json.dumps(
+                    {
+                        "order": position,
+                        "title": doc.title,
+                        "knowledge_scope": knowledge_scope,
+                    },
+                    ensure_ascii=False,
+                )
                 session.add(
                     DocumentChunk(
                         organization_id=organization_id,
