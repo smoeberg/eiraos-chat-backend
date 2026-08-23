@@ -1,85 +1,90 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from eiraos.core.database import get_db
+from eiraos.api.v1.auth import get_current_user, get_current_active_organization
 from eiraos.domains.documents.models import DocumentChunk
-from eiraos.api.v1.auth import get_current_user
+from eiraos.domains.documents.rag_service import RAGService
+from eiraos.core.config import settings
+import httpx
 
-router = APIRouter(prefix="/documents", tags=["RAG & Knowledge Base"])
+router = APIRouter(prefix="/documents", tags=["RAG & Documents"])
 
-class DocumentIngestSchema(BaseModel):
-    organization_id: int = Field(..., description="Tenant organization ID")
+class DocumentIngestRequest(BaseModel):
     title: str
-    source: str
     content: str
-    embedding: List[float] = Field(..., description="Vector embedding array (dim 1536)")
+    metadata: Optional[Dict[str, Any]] = None
 
-class DocumentSearchSchema(BaseModel):
-    organization_id: int
-    query_embedding: List[float]
-    match_threshold: float = 0.75
+class DocumentSearchRequest(BaseModel):
+    query: str
     limit: int = 5
 
+async def generate_embedding(text_content: str) -> List[float]:
+    """Helper to generate text embedding via OpenAI API."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "text-embedding-ada-002", "input": text_content}
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"]
+
 @router.post("/ingest", status_code=status.HTTP_201_CREATED)
-async def ingest_document_chunk(
-    payload: DocumentIngestSchema,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+async def ingest_document(
+    payload: DocumentIngestRequest,
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Ingest a document chunk and its vector embedding into PostgreSQL with pgvector.
+    Ingest document, perform intelligent chunking, compute embeddings, and store in pgvector.
     """
-    chunk = DocumentChunk(
-        organization_id=payload.organization_id,
-        title=payload.title,
-        source=payload.source,
-        content=payload.content,
-        embedding=payload.embedding
-    )
-    db.add(chunk)
+    chunks = RAGService.intelligent_chunking(payload.content)
+    stored_count = 0
+
+    for chunk_text in chunks:
+        try:
+            embedding = await generate_embedding(chunk_text)
+            chunk_db = DocumentChunk(
+                organization_id=org_id,
+                content=chunk_text,
+                embedding=embedding,
+                metadata={"title": payload.title, **(payload.metadata or {})}
+            )
+            db.add(chunk_db)
+            stored_count += 1
+        except Exception as e:
+            # If embedding generation fails for a chunk, continue or log error
+            continue
+
     await db.commit()
-    await db.refresh(chunk)
-    return {"status": "success", "chunk_id": chunk.id, "title": chunk.title}
+    return {"status": "success", "chunks_stored": stored_count, "title": payload.title}
 
 @router.post("/search")
-async def semantic_search(
-    payload: DocumentSearchSchema,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+async def search_documents(
+    payload: DocumentSearchRequest,
+    current_user: dict = Depends(get_current_user),
+    org_id: int = Depends(get_current_active_organization),
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Perform high-performance vector similarity search using pgvector cosine distance operator (<=>).
-    Guarantees strict multi-tenant isolation by filtering on organization_id.
+    Perform hybrid vector semantic search within the tenant's organization scope.
     """
-    distance_expr = DocumentChunk.embedding.cosine_distance(payload.query_embedding)
-    
-    stmt = (
-        select(
-            DocumentChunk.id,
-            DocumentChunk.title,
-            DocumentChunk.source,
-            DocumentChunk.content,
-            (1 - distance_expr).label("similarity")
-        )
-        .where(DocumentChunk.organization_id == payload.organization_id)
-        .order_by(distance_expr)
-        .limit(payload.limit)
+    try:
+        query_embedding = await generate_embedding(payload.query)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to generate query embedding: {str(e)}")
+
+    results = await RAGService.hybrid_search(
+        db=db,
+        organization_id=org_id,
+        query_embedding=query_embedding,
+        query_text=payload.query,
+        limit=payload.limit
     )
 
-    result = await db.execute(stmt)
-    rows = result.fetchall()
-
-    matches = []
-    for row in rows:
-        if row.similarity >= payload.match_threshold:
-            matches.append({
-                "id": row.id,
-                "title": row.title,
-                "source": row.source,
-                "content": row.content,
-                "similarity": float(row.similarity)
-            })
-
-    return {"matches": matches}
+    return {"query": payload.query, "results": results}
