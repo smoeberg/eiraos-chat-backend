@@ -102,9 +102,10 @@ async def ingest_document(
     idem_key = raw_key.strip() or None
     ledger_key = f"doc:ingest:{idem_key}" if idem_key else None
 
+    lease_token = None
     if ledger_key:
         outcome = await idempotency.begin_idempotency(db, request, ledger_key)
-        if outcome == "completed":
+        if outcome.status == "completed" or outcome == "completed":
             cached = await idempotency.read_cached_response(db, request, ledger_key)
             if cached:
                 try:
@@ -112,6 +113,7 @@ async def ingest_document(
                 except json.JSONDecodeError:
                     pass
             return {"status": "duplicate", "document_id": None, "title": payload.title}
+        lease_token = outcome.lease_token
 
     doc = Document(
         organization_id=org_id,
@@ -147,7 +149,9 @@ async def ingest_document(
                     document_id=doc.id,
                     content=chunk_text,
                     embedding=emb,
-                    metadata_=json.dumps({"order": i, "title": payload.title}, ensure_ascii=False),
+                    metadata_=json.dumps(
+                        {"order": i, "title": payload.title}, ensure_ascii=False
+                    ),
                 )
             )
             stored += 1
@@ -180,7 +184,12 @@ async def ingest_document(
 
     if ledger_key:
         await idempotency.complete_idempotency(
-            db, request, ledger_key, status.HTTP_202_ACCEPTED, json.dumps(body)
+            db,
+            request,
+            ledger_key,
+            status.HTTP_202_ACCEPTED,
+            json.dumps(body),
+            lease_token=lease_token,
         )
     return body
 
