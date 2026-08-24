@@ -2,16 +2,21 @@ from eiraos.application.providers.base import AIProviderProtocol
 from eiraos.application.providers.openai_adapter import OpenAIProviderAdapter
 from eiraos.application.providers.anthropic_adapter import AnthropicProviderAdapter
 from eiraos.application.providers.gemini_adapter import GeminiProviderAdapter
+from eiraos.application.providers.governed import GovernedAIProvider
+
 
 class AIProviderFactory:
     @staticmethod
     def get_provider(provider_name: str, api_key: str) -> AIProviderProtocol:
         name = provider_name.lower()
         if name == "openai":
-            return OpenAIProviderAdapter(api_key=api_key)
+            provider = OpenAIProviderAdapter(api_key=api_key)
         elif name in ["anthropic", "claude"]:
-            return AnthropicProviderAdapter(api_key=api_key)
+            provider = AnthropicProviderAdapter(api_key=api_key)
+            name = "anthropic"
         elif name in ["google", "gemini"]:
-            return GeminiProviderAdapter(api_key=api_key)
+            provider = GeminiProviderAdapter(api_key=api_key)
+            name = "google"
         else:
             raise ValueError(f"Unsupported AI provider: {provider_name}")
+        return GovernedAIProvider(provider=provider, provider_name=name)
