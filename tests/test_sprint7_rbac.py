@@ -10,7 +10,7 @@ ALL_PERMISSIONS = {
     "member:manage", "bot:read", "bot:create", "bot:update", "bot:delete",
     "document:read", "document:upload", "document:delete",
     "conversation:read", "conversation:create", "conversation:delete",
-    "usage:read", "secret:manage",
+    "usage:read", "secret:manage", "tool:extract_structure",
 }
 
 
@@ -62,7 +62,6 @@ def test_require_permission_allows_holder():
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = mock_membership
         mock_db.execute.return_value = mock_result
-        # call the inner dependency directly with explicit current_user and db
         result = await dep.__call__(current_user=user, db=mock_db)
         assert result == user
 
@@ -90,9 +89,7 @@ def test_require_permission_denies_non_holder():
 
 def test_bot_write_gated_endpoints():
     """bot:update / bot:delete are anticipated-only today (no endpoints yet)."""
-    # Guard: every endpoint that mutates a bot must use require_permission.
     import inspect
     import eiraos.api.v1.bots as bots
     src = inspect.getsource(bots)
-    # create path must be gated (already is)
     assert "require_permission(\"bot:create\")" in src
