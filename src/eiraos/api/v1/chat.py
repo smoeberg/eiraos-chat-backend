@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.core.database import get_db
+from eiraos.core import idempotency
 
 SSE_HEARTBEAT_SECONDS = 15
 SSE_CHUNK_TIMEOUT_SECONDS = 30
@@ -83,6 +84,31 @@ async def _build_messages(
         max_history=max_history,
         history_token_budget=history_token_budget,
     )
+
+
+async def _lease_heartbeat(db, request, key, lease_token, lost):
+    from eiraos.application.chat_execution import _lease_heartbeat as impl
+    return await impl(db, request, key, lease_token, lost)
+
+
+async def _start_lease_heartbeat(db, request, key, lease_token):
+    from eiraos.application.chat_execution import _start_lease_heartbeat as impl
+    return await impl(db, request, key, lease_token)
+
+
+async def _stop_lease_heartbeat(task, lost):
+    from eiraos.application.chat_execution import _stop_lease_heartbeat as impl
+    return await impl(task, lost)
+
+
+async def _release_preflight_lease(db, request, idem_key, lease_token, status_code):
+    from eiraos.application.chat_execution import _release_preflight_lease as impl
+    return await impl(db, request, idem_key, lease_token, status_code)
+
+
+async def _transition_assistant(db, asst_id, conversation_id, bot_id, content, status_value):
+    from eiraos.application.chat_execution import _transition_assistant as impl
+    return await impl(db, asst_id, conversation_id, bot_id, content, status_value)
 
 
 chat_execution_service = None
