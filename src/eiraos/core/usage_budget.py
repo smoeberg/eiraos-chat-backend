@@ -33,12 +33,7 @@ class UsageBudgetReservation:
 
 
 class UsageBudgetGate:
-    """Fail-closed reservation gate for user/org/execution budgets.
-
-    The default constructor is intentionally private-by-convention. Production
-    wiring should provide an atomic persistence implementation. ``for_test``
-    exists only for deterministic unit tests.
-    """
+    """Fail-closed reservation gate for user/org/execution budgets."""
 
     def __init__(
         self,
@@ -57,35 +52,21 @@ class UsageBudgetGate:
     def for_test(cls, **kwargs: Any) -> "UsageBudgetGate":
         return cls(**kwargs)
 
-    def _required_cost(
-        self,
-        estimated_cost: float,
-        verification_estimated_cost: float = 0.0,
-    ) -> float:
+    def _required_cost(self, estimated_cost: float, verification_estimated_cost: float = 0.0) -> float:
         if estimated_cost < 0 or verification_estimated_cost < 0:
             raise BudgetExceeded("Estimated cost cannot be negative.")
         return estimated_cost + verification_estimated_cost
 
-    def _validate(
-        self,
-        *,
-        estimated_cost: float,
-        verification_estimated_cost: float,
-    ) -> float:
+    def _validate(self, *, estimated_cost: float, verification_estimated_cost: float) -> float:
         if not self._backend_available:
             raise BudgetUnavailable("Usage budget state is unavailable.")
-
         required = self._required_cost(estimated_cost, verification_estimated_cost)
-
         if self._max_execution_cost is not None and required > self._max_execution_cost:
             raise BudgetExceeded("Execution budget exceeded.")
-
         if self._user_remaining is not None and required > self._user_remaining:
             raise BudgetExceeded("User quota exceeded.")
-
         if self._organization_remaining is not None and required > self._organization_remaining:
             raise BudgetExceeded("Organization budget exceeded.")
-
         return required
 
     def try_reserve(
@@ -96,21 +77,19 @@ class UsageBudgetGate:
         estimated_cost: float,
         verification_estimated_cost: float = 0.0,
     ) -> bool:
-        """Atomically reserve the full estimated execution cost.
-
-        No counters are mutated unless every configured constraint can be
-        satisfied. This prevents partial reservation and oversubscription.
-        """
-        required = self._validate(
-            estimated_cost=estimated_cost,
-            verification_estimated_cost=verification_estimated_cost,
-        )
+        """Attempt an atomic reservation; return False when it cannot be made."""
+        try:
+            required = self._validate(
+                estimated_cost=estimated_cost,
+                verification_estimated_cost=verification_estimated_cost,
+            )
+        except UsageBudgetError:
+            return False
 
         if self._user_remaining is not None:
             self._user_remaining -= required
         if self._organization_remaining is not None:
             self._organization_remaining -= required
-
         return True
 
     def reserve_or_raise(
@@ -122,22 +101,15 @@ class UsageBudgetGate:
         verification_estimated_cost: float = 0.0,
         provider_call: Any | None = None,
     ) -> UsageBudgetReservation:
-        """Reserve budget and return a reservation before provider execution.
-
-        ``provider_call`` is accepted for compatibility with the acceptance
-        tests but is deliberately never invoked here. Provider execution is
-        owned by the caller after a successful reservation.
-        """
+        """Reserve budget and return a reservation before provider execution."""
         required = self._validate(
             estimated_cost=estimated_cost,
             verification_estimated_cost=verification_estimated_cost,
         )
-
         if self._user_remaining is not None:
             self._user_remaining -= required
         if self._organization_remaining is not None:
             self._organization_remaining -= required
-
         return UsageBudgetReservation(
             user_id=user_id,
             organization_id=organization_id,
