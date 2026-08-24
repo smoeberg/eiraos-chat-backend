@@ -40,20 +40,22 @@ class RAGService:
         if scope == "public":
             return """
               AND (
-                metadata IS NULL
-                OR (metadata::jsonb->>'visibility') IS NULL
-                OR (metadata::jsonb->>'visibility') = 'public'
+                dc.metadata IS NULL
+                OR (dc.metadata::jsonb->>'visibility') IS NULL
+                OR (dc.metadata::jsonb->>'visibility') = 'public'
               )
             """
         if scope == "private":
             return """
-              AND metadata IS NOT NULL
-              AND (metadata::jsonb->>'visibility') = 'private'
+              AND dc.metadata IS NOT NULL
+              AND (dc.metadata::jsonb->>'visibility') = 'private'
+              AND d.owner = :caller_user_id
+              AND d.organization_id = :org_id
             """
         if scope != "organization":
             return """
-              AND metadata IS NOT NULL
-              AND (metadata::jsonb->>'knowledge_scope') = :knowledge_scope
+              AND dc.metadata IS NOT NULL
+              AND (dc.metadata::jsonb->>'knowledge_scope') = :knowledge_scope
             """
         return ""
 
@@ -65,27 +67,41 @@ class RAGService:
         query_text: str,
         limit: int = 5,
         knowledge_scope: str = "organization",
+        caller_user_id: int | None = None,
     ) -> List[Dict[str, Any]]:
-        """Hybrid retrieval with organization isolation and optional category scope."""
+        """Hybrid retrieval with tenant isolation and owner isolation for private scope."""
+        scope = (knowledge_scope or "organization").lower()
+        if scope == "private" and caller_user_id is None:
+            raise PermissionError("Private knowledge scope requires verified user context.")
+
         embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
         qtext = (query_text or "").strip()
         rrf_k = 60
         fetch_n = max(limit * 4, 20)
-        scope_sql = RAGService._scope_clause(knowledge_scope)
+        scope_sql = RAGService._scope_clause(scope)
         params = {
             "query_embedding": embedding_str,
             "org_id": organization_id,
             "lim": fetch_n,
-            "knowledge_scope": knowledge_scope,
+            "knowledge_scope": scope,
+            "caller_user_id": caller_user_id,
         }
 
+        if scope == "private":
+            from_sql = """
+                FROM document_chunks dc
+                JOIN documents d ON d.id = dc.document_id
+            """
+        else:
+            from_sql = "FROM document_chunks dc"
+
         vector_sql = text(f"""
-            SELECT id, organization_id, content, metadata,
-                   (1 - (embedding <=> :query_embedding::vector)) AS vector_score
-            FROM document_chunks
-            WHERE organization_id = :org_id
+            SELECT dc.id, dc.organization_id, dc.content, dc.metadata,
+                   (1 - (dc.embedding <=> :query_embedding::vector)) AS vector_score
+            {from_sql}
+            WHERE dc.organization_id = :org_id
             {scope_sql}
-            ORDER BY embedding <=> :query_embedding::vector ASC
+            ORDER BY dc.embedding <=> :query_embedding::vector ASC
             LIMIT :lim
         """)
         vector_rows = (await db.execute(vector_sql, params)).fetchall()
@@ -94,14 +110,14 @@ class RAGService:
         if qtext:
             try:
                 fts_sql = text(f"""
-                    SELECT id, organization_id, content, metadata,
+                    SELECT dc.id, dc.organization_id, dc.content, dc.metadata,
                            ts_rank(
-                             to_tsvector('simple', coalesce(content, '')),
+                             to_tsvector('simple', coalesce(dc.content, '')),
                              plainto_tsquery('simple', :qtext)
                            ) AS text_score
-                    FROM document_chunks
-                    WHERE organization_id = :org_id
-                      AND to_tsvector('simple', coalesce(content, ''))
+                    {from_sql}
+                    WHERE dc.organization_id = :org_id
+                      AND to_tsvector('simple', coalesce(dc.content, ''))
                           @@ plainto_tsquery('simple', :qtext)
                     {scope_sql}
                     ORDER BY text_score DESC
