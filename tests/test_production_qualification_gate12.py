@@ -83,36 +83,20 @@ async def test_g2_2_lease_fencing_rejects_stale_token():
     from eiraos.domains.idempotency.models import IdempotencyRecord
 
     body = b'{"x":1}'
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [],
-        "query_string": b"",
-    }
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
     request = Request(scope)
     request.state.cached_body = body
     request.state.organization_id = 1
     request.state.user_id = 2
-
     digest = hashlib.sha256(body).hexdigest()
-    existing = IdempotencyRecord(
-        organization_id=1,
-        user_id=2,
-        key="k",
-        request_hash=digest,
-        status="processing",
-        lease_token="token-B",
-    )
+    existing = IdempotencyRecord(organization_id=1, user_id=2, key="k", request_hash=digest,
+                                 status="processing", lease_token="token-B")
     select_result = MagicMock()
     select_result.scalar_one_or_none.return_value = existing
     db = AsyncMock()
     db.execute = AsyncMock(return_value=select_result)
     db.commit = AsyncMock()
-
-    ok = await mod.complete_idempotency(
-        db, request, "k", 200, '{"from":"A"}', lease_token="token-A"
-    )
+    ok = await mod.complete_idempotency(db, request, "k", 200, '{"from":"A"}', lease_token="token-A")
     assert ok is False
     assert existing.response_reference is None
 
@@ -123,42 +107,27 @@ async def test_g2_2_lease_fencing_accepts_matching_token():
     from eiraos.domains.idempotency.models import IdempotencyRecord
 
     body = b'{"x":1}'
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [],
-        "query_string": b"",
-    }
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
     request = Request(scope)
     request.state.cached_body = body
     request.state.organization_id = 1
     request.state.user_id = 2
-
     digest = hashlib.sha256(body).hexdigest()
-    existing = IdempotencyRecord(
-        organization_id=1,
-        user_id=2,
-        key="k",
-        request_hash=digest,
-        status="processing",
-        lease_token="token-B",
-    )
+    existing = IdempotencyRecord(organization_id=1, user_id=2, key="k", request_hash=digest,
+                                 status="processing", lease_token="token-B")
     select_result = MagicMock()
     select_result.scalar_one_or_none.return_value = existing
     db = AsyncMock()
     db.execute = AsyncMock(return_value=select_result)
     db.commit = AsyncMock()
-
-    ok = await mod.complete_idempotency(
-        db, request, "k", 200, '{"from":"B"}', lease_token="token-B"
-    )
+    ok = await mod.complete_idempotency(db, request, "k", 200, '{"from":"B"}', lease_token="token-B")
     assert ok is True
     assert existing.status == "completed"
 
 
 def test_g2_3_chat_transitions_same_assistant_row():
-    from eiraos.api.v1 import chat as chat_mod
+    from eiraos.application.chat_execution import ChatExecutionService
+    from eiraos.application import chat_execution as chat_mod
 
     src = inspect.getsource(chat_mod)
     assert "_transition_assistant" in src
@@ -177,7 +146,6 @@ def test_g2_7_sync_fallback_not_client_controlled():
 
 def test_g2_8_health_uses_timeouts():
     from eiraos import main as main_mod
-
     src = inspect.getsource(main_mod.health_ready)
     assert "wait_for" in src
     assert "timeout" in src
@@ -185,7 +153,6 @@ def test_g2_8_health_uses_timeouts():
 
 def test_g2_rag_knowledge_scope_applied_in_sql():
     from eiraos.domains.documents.rag_service import RAGService
-
     public_clause = RAGService._scope_clause("public")
     private_clause = RAGService._scope_clause("private")
     assert "visibility" in public_clause
@@ -194,21 +161,13 @@ def test_g2_rag_knowledge_scope_applied_in_sql():
 
 def test_g2_document_chunk_metadata_column_name():
     from eiraos.domains.documents.models import DocumentChunk
-
     col = DocumentChunk.__table__.c.get("metadata")
     assert col is not None, "DB column must be named 'metadata' for raw SQL"
 
 
 def test_g2_idempotency_key_header_mismatch_rejected():
     from eiraos.core.idempotency import resolve_idempotency_key
-
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "headers": [(b"idempotency-key", b"header-key")],
-        "query_string": b"",
-    }
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [(b"idempotency-key", b"header-key")], "query_string": b""}
     request = Request(scope)
     with pytest.raises(HTTPException) as ei:
         resolve_idempotency_key(request, "body-key")
