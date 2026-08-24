@@ -18,7 +18,7 @@ from eiraos.application.business_features import verify_answer, build_knowledge_
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
 from eiraos.core.config import settings
-from eiraos.core.usage_budget import BudgetExceeded, UsageBudgetGate
+from eiraos.core.usage_budget import BudgetExceeded, BudgetUnavailable, UsageBudgetGate
 from eiraos.application.usage_execution import ProviderExecutionBudget
 from eiraos.domains.usage.cost_estimator import CostEstimator
 
@@ -28,16 +28,24 @@ SSE_CHUNK_TIMEOUT_SECONDS = 30
 _CHARS_PER_TOKEN = 4
 DEFAULT_HISTORY_TOKEN_BUDGET = 8000
 MAX_KNOWLEDGE_SCOPE_CHARS = 120
+_USAGE_BUDGET_GATE: UsageBudgetGate | None = None
+
+
+def _usage_budget_gate() -> UsageBudgetGate:
+    global _USAGE_BUDGET_GATE
+    if _USAGE_BUDGET_GATE is None:
+        _USAGE_BUDGET_GATE = UsageBudgetGate(
+            user_remaining=settings.USER_BUDGET_REMAINING,
+            organization_remaining=settings.ORGANIZATION_BUDGET_REMAINING,
+            max_execution_cost=settings.EXECUTION_BUDGET_MAX_COST,
+        )
+    return _USAGE_BUDGET_GATE
 
 
 def _execution_budget() -> ProviderExecutionBudget:
     return ProviderExecutionBudget(
         estimator=CostEstimator(),
-        gate_factory=lambda: UsageBudgetGate(
-            user_remaining=settings.USER_BUDGET_REMAINING,
-            organization_remaining=settings.ORGANIZATION_BUDGET_REMAINING,
-            max_execution_cost=settings.EXECUTION_BUDGET_MAX_COST,
-        ),
+        gate_factory=_usage_budget_gate,
     )
 
 
@@ -243,6 +251,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         )
     except BudgetExceeded as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Execution budget exceeded.") from exc
+    except BudgetUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution budget unavailable.") from exc
     idem_key = idempotency.resolve_idempotency_key(request, getattr(payload, "idempotency_key", None))
     lease_token: str | None = None
     if idem_key:
