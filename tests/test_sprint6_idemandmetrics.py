@@ -21,7 +21,7 @@ def test_chat_completion_request_has_idempotency_key_field():
 def test_chat_completions_endpoint_has_request_param():
     """The non-streaming completions endpoint must accept a Request for idempotency."""
     import inspect
-    from eiraos.api.v1 import router, chat
+    from eiraos.api.v1 import chat
 
     route = next(
         r for r in chat.router.routes
@@ -32,9 +32,11 @@ def test_chat_completions_endpoint_has_request_param():
 
 
 def test_idempotency_begins_before_provider_nonstream():
-    """Assert the non-streaming completion path reserves idempotency."""
+    """The application execution service owns idempotency reservation/completion."""
     import inspect
-    import eiraos.api.v1.chat as chat
-    src = inspect.getsource(chat.create_chat_completion)
+    from eiraos.application.chat_execution import ChatExecutionService
+
+    src = inspect.getsource(ChatExecutionService.execute)
+    nonstream = inspect.getsource(ChatExecutionService._execute_non_streaming)
     assert "begin_idempotency" in src
-    assert "complete_idempotency" in src
+    assert "complete_idempotency" in nonstream
