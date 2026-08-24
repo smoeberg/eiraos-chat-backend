@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     JWT_AUDIENCE: str = "eiraos-api"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos"
     REDIS_URL: str = ""
+    EXECUTION_BUDGET_MAX_COST: float = 20000.0
+    USER_BUDGET_REMAINING: float | None = None
+    ORGANIZATION_BUDGET_REMAINING: float | None = None
     # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False
     STORAGE_ROOT: str = "storage/uploads"
