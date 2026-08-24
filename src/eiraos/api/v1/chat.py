@@ -11,6 +11,9 @@ from eiraos.application.chat_execution import (
     _find_verifier_bot,
     _provider_for_bot,
     _valid_knowledge_scope,
+    _build_messages,
+    _next_chunk,
+    _sanitize,
 )
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
