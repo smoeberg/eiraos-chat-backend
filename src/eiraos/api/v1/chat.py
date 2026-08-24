@@ -6,6 +6,11 @@ from eiraos.core.database import get_db
 from eiraos.application.chat_execution import (
     ChatCompletionRequest,
     ChatExecutionService,
+    SSE_HEARTBEAT_SECONDS,
+    SSE_CHUNK_TIMEOUT_SECONDS,
+    _CHARS_PER_TOKEN,
+    DEFAULT_HISTORY_TOKEN_BUDGET,
+    MAX_KNOWLEDGE_SCOPE_CHARS,
     _bot_accessible,
     _verifier_bot_accessible,
     _find_verifier_bot,
