@@ -3,6 +3,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 import httpx
+from pydantic import ValidationError
 
 from eiraos.application.providers.openai_adapter import OpenAIProviderAdapter
 from eiraos.application.structured.schemas import ContentExtractionSchema
@@ -10,14 +11,14 @@ from eiraos.application.structured.service import StructuredExtractionService
 from eiraos.api.v1.structured_tools import require_structured_tool_permission
 from eiraos.api.v1.auth import get_current_active_organization, get_current_user
 from eiraos.core.config import settings
+from eiraos.core.exceptions import EiraOSException
 from eiraos.main import app
-
 
 SECRET = "TEST_PROVIDER_SECRET_7f3a9c"
 
 
 def test_schema_forbids_unknown_fields():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         ContentExtractionSchema.model_validate(
             {
                 "title": "A",
@@ -32,22 +33,24 @@ def test_schema_forbids_unknown_fields():
 
 
 @pytest.mark.asyncio
-async def test_structured_service_revalidates_provider_output():
+async def test_structured_service_revalidates_provider_output_and_sanitizes_error():
     class FakeProvider:
         async def generate_structured_output(self, **kwargs):
             return {
                 "title": "Test",
                 "summary": "Summary",
                 "content_type": "note",
-                "language": "DA",
-                "key_points": ["one", "two"],
+                "language": "da",
+                "key_points": ["one"],
                 "entities": [],
                 "unexpected": SECRET,
             }
 
     service = StructuredExtractionService(FakeProvider())
-    with pytest.raises(ValueError):
+    with pytest.raises(EiraOSException) as exc:
         await service.extract("input", "test-model")
+    assert exc.value.status_code == 502
+    assert SECRET not in exc.value.detail
 
 
 @pytest.mark.asyncio
@@ -60,20 +63,14 @@ async def test_openai_structured_request_uses_strict_json_schema(monkeypatch):
 
         def json(self):
             return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps({
-                                "title": "Test",
-                                "summary": "Summary",
-                                "content_type": "note",
-                                "language": "da",
-                                "key_points": ["one"],
-                                "entities": [],
-                            })
-                        }
-                    }
-                ]
+                "choices": [{"message": {"content": json.dumps({
+                    "title": "Test",
+                    "summary": "Summary",
+                    "content_type": "note",
+                    "language": "da",
+                    "key_points": ["one"],
+                    "entities": [],
+                })}}]
             }
 
     class FakeClient:
@@ -112,7 +109,7 @@ def test_extract_structure_requires_authentication():
     assert response.status_code == 401
 
 
-def test_extract_structure_rejects_extra_request_fields(monkeypatch):
+def test_extract_structure_rejects_extra_request_fields():
     app.dependency_overrides[get_current_user] = lambda: {"user_id": 7, "organization_id": 11}
     app.dependency_overrides[get_current_active_organization] = lambda: 11
     app.dependency_overrides[require_structured_tool_permission] = lambda: {"user_id": 7}

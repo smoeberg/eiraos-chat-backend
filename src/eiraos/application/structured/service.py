@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
+
 from eiraos.application.providers.openai_adapter import OpenAIProviderAdapter
-from eiraos.core.exceptions import EiraOSException
 from eiraos.application.structured.schemas import ContentExtractionSchema
+from eiraos.core.exceptions import EiraOSException
 
 
 class StructuredExtractionService:
@@ -27,7 +29,15 @@ class StructuredExtractionService:
             schema_name="content_extraction_v1",
             schema=ContentExtractionSchema.model_json_schema(),
         )
-        validated = ContentExtractionSchema.model_validate(result)
+        try:
+            validated = ContentExtractionSchema.model_validate(result)
+        except ValidationError as exc:
+            raise EiraOSException(
+                title="Structured extraction validation failed",
+                detail="The provider response did not satisfy the structured data contract.",
+                status_code=502,
+            ) from exc
+
         return {
             "schema_version": "1.0",
             "data": validated.model_dump(mode="json"),
