@@ -31,20 +31,20 @@ ROLE_PERMISSIONS = {
         "bot:read", "bot:create", "bot:update", "bot:delete",
         "document:read", "document:upload", "document:delete",
         "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read", "secret:manage"
+        "usage:read", "secret:manage", "tool:extract_structure"
     ],
     "admin": [
         "organization:read", "member:invite", "member:remove",
         "bot:read", "bot:create", "bot:update", "bot:delete",
         "document:read", "document:upload", "document:delete",
         "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read"
+        "usage:read", "tool:extract_structure"
     ],
     "member": [
         "bot:read",
         "document:read", "document:upload",
         "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read"
+        "usage:read", "tool:extract_structure"
     ],
     "viewer": [
         "bot:read",
