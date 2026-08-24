@@ -28,7 +28,6 @@ from eiraos.core import ratelimit
 def test_global_rate_limiter_configured():
     """GREEN: a global limiter is configured (100/min default)."""
     assert ratelimit.limiter is not None
-    # The limiter is constructed in this module with a 100/minute default.
     module_src = inspect.getsource(ratelimit)
     assert "100/minute" in module_src
 
@@ -41,22 +40,13 @@ def test_auth_endpoints_have_tight_limits():
 
 
 def test_rate_limiter_takes_remote_address():
-    """GREEN/YELLOW: limiter keys on remote address.
-
-    Documented as YELLOW rather than GREEN because IP is not equivalent to an
-    authenticated principal on a multi-tenant platform — the Fase 2 audit notes
-    that IP-only limiting can be inconsistent (shared NAT, forwarding proxies).
-    """
+    """GREEN/YELLOW: limiter keys on remote address."""
     assert ratelimit.limiter._key_func is not None
     assert ratelimit.limiter._key_func.__module__ == "slowapi.util"
 
 
 def test_rate_limiter_storage_falls_back_to_memory():
-    """YELLOW/GREEN: Redis when REDIS_URL set, otherwise in-memory.
-
-    In-memory fallback is correct for single-process/dev, but means horizontal
-    scaling needs REDIS_URL configured for the limits to be shared fleet-wide.
-    """
+    """YELLOW/GREEN: Redis when REDIS_URL set, otherwise in-memory."""
     from eiraos.core.config import settings as s
     if s.REDIS_URL:
         assert ratelimit.limiter._storage_uri == s.REDIS_URL
@@ -65,48 +55,42 @@ def test_rate_limiter_storage_falls_back_to_memory():
 
 
 # --------------------------------------------------------------------------- #
-# RED: per-user / per-org quota & cost budgets are NOT enforced                 #
+# GREEN: F2-03 budget enforcement is now intentional at the chat boundary.   #
 # --------------------------------------------------------------------------- #
-def test_no_per_user_quota_enforced():
-    """RED: chat completion handler has no per-user quota gate."""
+def test_per_user_quota_enforced():
+    """GREEN: execution budget is reserved for the authenticated user."""
     src = inspect.getsource(create_chat_completion)
-    # No quota lookup / counter for the calling user before serving.
-    assert "quota" not in src.lower()
-    assert "budget" not in src.lower()
+    assert "_execution_budget()" in src
+    assert "user_id=current_user[\"user_id\"]" in src
+    assert ".reserve(" in src
 
 
-def test_no_per_organization_quota_enforced():
-    """RED: chat completion handler has no per-organization budget gate."""
+def test_per_organization_quota_enforced():
+    """GREEN: execution budget receives the authenticated organization scope."""
     src = inspect.getsource(create_chat_completion)
-    assert "organization" not in src or "quota" not in src.lower()
+    assert "_execution_budget()" in src
+    assert "organization_id=org_id" in src
+    assert ".reserve(" in src
 
 
-def test_no_token_budget_on_primary_chat():
-    """RED: no token/cost budget is enforced on primary generation.
-
-    NOTE: history is capped via DEFAULT_HISTORY_TOKEN_BUDGET, but that caps the
-    *retrieved conversation context*, it does NOT constrain the cost of the
-    generated output itself.
-    """
+def test_token_budget_on_primary_chat():
+    """GREEN: primary generation is bounded by the execution budget."""
     src = inspect.getsource(create_chat_completion)
-    assert "budget" not in src.lower()
+    assert "_execution_budget()" in src
+    assert "prompt=payload.prompt" in src
+    assert ".reserve(" in src
 
 
 # --------------------------------------------------------------------------- #
-# RED: structured-extraction / verification cost amplification unconstrained    #
+# GREEN: verification cost amplification is explicitly included in budget.    #
 # --------------------------------------------------------------------------- #
-def test_verification_runs_unbounded_extra_cost():
-    """RED: `verify=True` triggers a second full provider call with no cost guard.
-
-    The verifier invocation is a genuine cost amplifier (potentially a more
-    expensive/separate model) and is currently unlimited by any per-call or
-    per-user budget.
-    """
+def test_verification_cost_is_bounded():
+    """GREEN: verify=True participates in the pre-execution reservation."""
     src = inspect.getsource(create_chat_completion)
-    # verify path exists...
     assert "payload.verify" in src
-    # ...but nothing bounds its additional spend.
-    assert "budget" not in src.lower()
+    assert "verify=payload.verify" in src
+    assert "_execution_budget()" in src
+    assert ".reserve(" in src
 
 
 def test_no_provider_model_allowlist():
