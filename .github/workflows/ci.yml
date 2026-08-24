@@ -28,6 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Diagnose checkout and Python imports
+        run: |
+          echo "=== GIT HEAD ==="
+          git rev-parse HEAD
+          echo "=== CHAT FILE ==="
+          git status --short
+          grep -n "DEFAULT_HISTORY_TOKEN_BUDGET\|MAX_KNOWLEDGE_SCOPE_CHARS\|_build_messages\|_next_chunk\|_sanitize" src/eiraos/api/v1/chat.py || true
+          echo "=== PYTHON IMPORT ==="
+          python -c "import eiraos.api.v1.chat as c; print(c.__file__); print('DEFAULT_HISTORY_TOKEN_BUDGET=', getattr(c, 'DEFAULT_HISTORY_TOKEN_BUDGET', '<MISSING>')); print('MAX_KNOWLEDGE_SCOPE_CHARS=', getattr(c, 'MAX_KNOWLEDGE_SCOPE_CHARS', '<MISSING>')); print('_build_messages=', hasattr(c, '_build_messages')); print('_next_chunk=', hasattr(c, '_next_chunk')); print('_sanitize=', hasattr(c, '_sanitize'))"
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
