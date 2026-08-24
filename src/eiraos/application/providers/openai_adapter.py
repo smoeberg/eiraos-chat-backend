@@ -59,7 +59,56 @@ class OpenAIProviderAdapter:
                 response.raise_for_status()
                 return _unpack_message(response.json())
             except httpx.HTTPError as e:
-                raise EiraOSException(title="Upstream request failed", detail=f"Completion request failed (HTTP {e.response.status_code}).", status_code=502)
+                status_code = e.response.status_code if e.response is not None else 502
+                raise EiraOSException(title="Upstream request failed", detail=f"Completion request failed (HTTP {status_code}).", status_code=502) from e
+
+    async def generate_structured_output(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        schema_name: str,
+        schema: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Request strict JSON-schema output and return only validated JSON data."""
+        if not schema_name or not schema:
+            raise ValueError("schema_name and schema are required")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "temperature": 0,
+                        "stream": False,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": schema_name,
+                                "strict": True,
+                                "schema": schema,
+                            },
+                        },
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = _unpack_message(data)
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Structured provider output was not an object")
+                return parsed
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise EiraOSException(
+                    title="Structured extraction failed",
+                    detail="The provider returned an invalid or unusable structured response.",
+                    status_code=502,
+                ) from exc
 
     async def stream_chat_completion(
         self,

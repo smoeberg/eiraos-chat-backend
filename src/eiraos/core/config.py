@@ -24,12 +24,12 @@ class Settings(BaseSettings):
     JWT_AUDIENCE: str = "eiraos-api"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos"
     REDIS_URL: str = ""
-    # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False
     STORAGE_ROOT: str = "storage/uploads"
     OPENAI_API_KEY: Optional[str] = "sk-placeholder"
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    STRUCTURED_EXTRACTION_MODEL: str = "gpt-4o-mini"
     CORS_ORIGINS: str = "http://localhost:3000"
 
     @field_validator("SECRET_KEY")
@@ -53,8 +53,7 @@ class Settings(BaseSettings):
             return v
         if v in PLACEHOLDER_API_KEYS or not isinstance(v, str) or v.strip() == "":
             raise ValueError(
-                f"provider API key placeholder rejected in {env}; "
-                "set a real key."
+                f"provider API key placeholder rejected in {env}; set a real key."
             )
         return v
 
