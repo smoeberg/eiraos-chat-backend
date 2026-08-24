@@ -85,7 +85,9 @@ async def test_openai_structured_request_uses_strict_json_schema(monkeypatch):
 
         async def post(self, url, **kwargs):
             captured.update(kwargs)
-            assert SECRET not in json.dumps(kwargs)
+            # The credential is expected in the internal Authorization header.
+            # It must never be serialized into the provider JSON payload.
+            assert SECRET not in json.dumps(kwargs.get("json", {}))
             return FakeResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
