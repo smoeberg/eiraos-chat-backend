@@ -282,5 +282,6 @@ async def search_documents(
         query_embedding=query_embedding,
         query_text=payload.query,
         limit=payload.limit,
+        caller_user_id=current_user["user_id"],
     )
     return {"query": payload.query, "results": results}
