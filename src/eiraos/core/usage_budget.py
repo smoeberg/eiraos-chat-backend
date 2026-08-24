@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 
@@ -26,7 +27,7 @@ class UsageBudgetReservation:
 
 
 class UsageBudgetGate:
-    """Fail-closed reservation gate for user/org/execution budgets."""
+    """Fail-closed atomic reservation gate for user/org/execution budgets."""
 
     def __init__(self, *, user_remaining: float | None = None,
                  organization_remaining: float | None = None,
@@ -36,6 +37,7 @@ class UsageBudgetGate:
         self._organization_remaining = organization_remaining
         self._max_execution_cost = max_execution_cost
         self._backend_available = backend_available
+        self._lock = Lock()
 
     @classmethod
     def for_test(cls, **kwargs: Any) -> "UsageBudgetGate":
@@ -57,23 +59,27 @@ class UsageBudgetGate:
 
     def try_reserve(self, *, user_id: int, organization_id: int,
                     estimated_cost: float, verification_estimated_cost: float = 0.0) -> bool:
-        try:
-            required = self._validate(estimated_cost, verification_estimated_cost)
-        except UsageBudgetError:
-            return False
-        if self._user_remaining is not None:
-            self._user_remaining -= required
-        if self._organization_remaining is not None:
-            self._organization_remaining -= required
-        return True
+        del user_id, organization_id
+        with self._lock:
+            try:
+                required = self._validate(estimated_cost, verification_estimated_cost)
+            except UsageBudgetError:
+                return False
+            if self._user_remaining is not None:
+                self._user_remaining -= required
+            if self._organization_remaining is not None:
+                self._organization_remaining -= required
+            return True
 
     def reserve_or_raise(self, *, user_id: int, organization_id: int,
                          estimated_cost: float, verification_estimated_cost: float = 0.0,
                          provider_call: Any | None = None) -> UsageBudgetReservation:
-        required = self._validate(estimated_cost, verification_estimated_cost)
-        if self._user_remaining is not None:
-            self._user_remaining -= required
-        if self._organization_remaining is not None:
-            self._organization_remaining -= required
-        return UsageBudgetReservation(user_id, organization_id, estimated_cost,
-                                      verification_estimated_cost, required)
+        del provider_call
+        with self._lock:
+            required = self._validate(estimated_cost, verification_estimated_cost)
+            if self._user_remaining is not None:
+                self._user_remaining -= required
+            if self._organization_remaining is not None:
+                self._organization_remaining -= required
+            return UsageBudgetReservation(user_id, organization_id, estimated_cost,
+                                          verification_estimated_cost, required)
