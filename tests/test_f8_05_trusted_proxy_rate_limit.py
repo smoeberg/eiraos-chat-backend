@@ -39,6 +39,7 @@ def test_ipv6_addresses_are_canonicalized(monkeypatch):
 def production(**overrides):
     values = dict(
         APP_ENV="production", SECRET_KEY="s" * 48, REDIS_URL="redis://redis:6379/0",
+        USER_TOKEN_BUDGET_LIMIT=1000, ORGANIZATION_TOKEN_BUDGET_LIMIT=10000,
         CORS_ORIGINS="https://app.example.com", TRUSTED_HOSTS="api.example.com",
         TRUSTED_PROXY_CIDRS="10.20.0.0/16",
     )

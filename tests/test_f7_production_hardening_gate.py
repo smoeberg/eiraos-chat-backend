@@ -28,6 +28,8 @@ def test_production_gate_rejects_open_ingress_and_weak_session_config():
         APP_ENV="production", SECRET_KEY="s" * 48,
         OPENAI_API_KEY="sk-real-production-key",
         REDIS_URL="redis://redis:6379/0",
+        USER_TOKEN_BUDGET_LIMIT=1000,
+        ORGANIZATION_TOKEN_BUDGET_LIMIT=10000,
         CORS_ORIGINS="https://app.example.com",
         TRUSTED_HOSTS="api.example.com",
     )

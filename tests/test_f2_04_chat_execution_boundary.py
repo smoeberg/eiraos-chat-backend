@@ -65,6 +65,20 @@ async def test_replay_short_circuits_before_budget_provider_and_writes():
 
 
 @pytest.mark.asyncio
+async def test_budget_boundary_accepts_async_distributed_reservation():
+    events = []
+
+    async def budget(scope):
+        events.append("async-budget")
+
+    result = await _boundary(events, budget=budget).prepare()
+    assert result.provider_context == "provider-context"
+    assert events == [
+        "authorize", "idempotency", "budget", "async-budget", "persistence", "provider"
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_step", ["authorize", "idempotency", "budget", "provider", "persistence"])
 async def test_failure_stops_all_later_operations(failure_step):
     events = []

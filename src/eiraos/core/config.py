@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     EXECUTION_BUDGET_MAX_COST: float = 20000.0
     USER_BUDGET_REMAINING: float | None = None
     ORGANIZATION_BUDGET_REMAINING: float | None = None
+    USER_TOKEN_BUDGET_LIMIT: int | None = Field(default=None, gt=0)
+    ORGANIZATION_TOKEN_BUDGET_LIMIT: int | None = Field(default=None, gt=0)
     CHAT_PROVIDER_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
     PROVIDER_HTTP_MAX_ATTEMPTS: int = Field(default=2, ge=1, le=3)
     PROVIDER_HTTP_BACKOFF_SECONDS: float = Field(default=0.1, ge=0, le=2)
@@ -119,6 +121,13 @@ class Settings(BaseSettings):
                 raise ValueError("production requires explicit trusted proxy CIDRs")
             if any(network.prefixlen == 0 for network in proxy_networks):
                 raise ValueError("production trusted proxy CIDRs cannot trust every address")
+        if self.APP_ENV in {"staging", "production"}:
+            if self.USER_TOKEN_BUDGET_LIMIT is None:
+                raise ValueError(f"{self.APP_ENV} requires an explicit user token budget limit")
+            if self.ORGANIZATION_TOKEN_BUDGET_LIMIT is None:
+                raise ValueError(
+                    f"{self.APP_ENV} requires an explicit organization token budget limit"
+                )
         return self
 
     @property

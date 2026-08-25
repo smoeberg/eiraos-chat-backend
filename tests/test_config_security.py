@@ -15,6 +15,8 @@ def test_production_accepts_strong_secret_key():
         APP_ENV="production", SECRET_KEY="x" * 48,
         OPENAI_API_KEY="sk-real-1234567890abcdef",
         REDIS_URL="redis://redis:6379/0",
+        USER_TOKEN_BUDGET_LIMIT=1000,
+        ORGANIZATION_TOKEN_BUDGET_LIMIT=10000,
         CORS_ORIGINS="https://app.example.com",
         TRUSTED_HOSTS="api.example.com",
     )

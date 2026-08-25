@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Generic, TypeVar
+import inspect
 
 TAuthorized = TypeVar("TAuthorized")
 TProvider = TypeVar("TProvider")
@@ -41,7 +42,7 @@ class ChatExecutionBoundary(Generic[TAuthorized, TProvider]):
         *,
         authorize: Callable[[], Awaitable[TAuthorized]],
         reserve_idempotency: Callable[[], Awaitable[IdempotencyReservation]],
-        reserve_budget: Callable[[TAuthorized], None],
+        reserve_budget: Callable[[TAuthorized], None | Awaitable[None]],
         prepare_provider: Callable[[TAuthorized], Awaitable[TProvider]],
         persist_request: Callable[[TAuthorized], Awaitable[None]],
     ) -> None:
@@ -61,7 +62,9 @@ class ChatExecutionBoundary(Generic[TAuthorized, TProvider]):
                 idempotency=idem,
                 cached_response=idem.cached_response,
             )
-        self._reserve_budget(authorized)
+        budget_result = self._reserve_budget(authorized)
+        if inspect.isawaitable(budget_result):
+            await budget_result
         await self._persist_request(authorized)
         provider_context = await self._prepare_provider(authorized)
         return PreparedChatExecution(

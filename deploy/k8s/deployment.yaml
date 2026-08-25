@@ -43,6 +43,16 @@ spec:
             secretKeyRef:
               name: eiraos-secrets
               key: redis-url
+        - name: USER_TOKEN_BUDGET_LIMIT
+          valueFrom:
+            secretKeyRef:
+              name: eiraos-secrets
+              key: user-token-budget-limit
+        - name: ORGANIZATION_TOKEN_BUDGET_LIMIT
+          valueFrom:
+            secretKeyRef:
+              name: eiraos-secrets
+              key: organization-token-budget-limit
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
