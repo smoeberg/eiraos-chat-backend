@@ -9,7 +9,10 @@ ROOT = Path(__file__).parents[1]
 
 def test_security_ci_audits_installed_dependency_graph():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    project = (ROOT / "pyproject.toml").read_text()
     assert "python -m pip_audit" in workflow
+    assert '"setuptools>=83.0.0"' in workflow
+    assert '"setuptools>=83.0.0"' in project
     assert workflow.index("pip install -e") < workflow.index("python -m pip_audit")
 
 

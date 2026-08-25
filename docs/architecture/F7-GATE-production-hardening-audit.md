@@ -10,6 +10,8 @@
   protected metrics, redaction and dependency health state.
 - Supply chain: every PR audits the installed Python dependency graph; weekly
   update monitoring covers Python, GitHub Actions and Docker.
+- Build tooling requires `setuptools>=83.0.0`, remediating PYSEC-2026-3447
+  discovered by the first gate run.
 
 ## Gate evidence
 
