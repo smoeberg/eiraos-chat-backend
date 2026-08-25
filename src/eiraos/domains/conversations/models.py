@@ -44,13 +44,19 @@ class ChatExecution(Base):
     organization_id = Column(Integer, nullable=False, index=True)
     user_id = Column(Integer, nullable=False, index=True)
     bot_id = Column(Integer, nullable=False, index=True)
-    idempotency_record_id = Column(Integer, ForeignKey("idempotency_records.id"),
+    idempotency_record_id = Column(Integer, ForeignKey("idempotency_records.id", ondelete="SET NULL"),
                                    nullable=True, unique=True, index=True)
     user_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, unique=True)
     assistant_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, unique=True)
     provider = Column(String(64), nullable=False)
     model = Column(String(128), nullable=False)
     status = Column(String(16), nullable=False, default="prepared")
+    attempt_count = Column(Integer, nullable=False, default=1)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    last_failure_code = Column(String(32), nullable=True)
+    failure_retryable = Column(Boolean, nullable=False, default=False)
+    partial_response = Column(Boolean, nullable=False, default=False)
+    recovered_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
                         server_default=text("CURRENT_TIMESTAMP"))
