@@ -13,6 +13,8 @@ from eiraos.api.v1.auth import (
     verify_password,
 )
 from eiraos.core.config import Settings, settings
+from eiraos.main import app
+from fastapi.testclient import TestClient
 
 
 def token(**overrides):
@@ -33,6 +35,21 @@ def test_registration_enforces_bounded_password_policy():
     with pytest.raises(ValidationError):
         UserRegister(email="user@example.com", password="x" * 129)
     assert UserRegister(email="user@example.com", password="correct horse battery staple")
+
+
+def test_public_registration_is_disabled_before_database_access(monkeypatch):
+    monkeypatch.setattr(settings, "ALLOW_PUBLIC_REGISTER", False)
+    response = TestClient(app).post("/api/v1/auth/register", json={
+        "email": "new-user@example.com",
+        "password": "correct horse battery staple",
+    })
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Public registration is disabled."
+
+
+def test_public_registration_requires_explicit_opt_in():
+    assert Settings().ALLOW_PUBLIC_REGISTER is False
+    assert Settings(ALLOW_PUBLIC_REGISTER=True).ALLOW_PUBLIC_REGISTER is True
 
 
 def test_password_verification_rejects_oversize_input_without_crashing():
