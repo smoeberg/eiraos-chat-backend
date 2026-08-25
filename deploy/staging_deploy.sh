@@ -3,7 +3,8 @@
 # Run on a machine with: docker, kubectl, registry auth, cluster context.
 #
 # Required env:
-#   DATABASE_URL, REDIS_URL, SECRET_KEY, TRUSTED_PROXY_CIDRS
+#   DATABASE_URL, REDIS_URL, SECRET_KEY, TRUSTED_PROXY_CIDRS,
+#   USER_TOKEN_BUDGET_LIMIT, ORGANIZATION_TOKEN_BUDGET_LIMIT
 # Optional:
 #   REGISTRY, IMAGE_NAME, NS, OPENAI_API_KEY, CORS_ORIGINS, TRUSTED_HOSTS,
 #   BASE_URL, EMAIL, PASSWORD
@@ -35,6 +36,8 @@ OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 CORS_ORIGINS="${CORS_ORIGINS:-https://app.staging.eiraos.ai}"
 TRUSTED_HOSTS="${TRUSTED_HOSTS:-api.staging.eiraos.ai,127.0.0.1}"
 : "${TRUSTED_PROXY_CIDRS:?Set TRUSTED_PROXY_CIDRS to the staging ingress proxy CIDR(s)}"
+: "${USER_TOKEN_BUDGET_LIMIT:?Set the approved per-user token budget limit}"
+: "${ORGANIZATION_TOKEN_BUDGET_LIMIT:?Set the approved per-organization token budget limit}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -54,6 +57,8 @@ kubectl -n "$NS" create secret generic eiraos-secrets \
   --from-literal=jwt-secret-key="$SECRET_KEY" \
   --from-literal=database-url="$DATABASE_URL" \
   --from-literal=redis-url="$REDIS_URL" \
+  --from-literal=user-token-budget-limit="$USER_TOKEN_BUDGET_LIMIT" \
+  --from-literal=organization-token-budget-limit="$ORGANIZATION_TOKEN_BUDGET_LIMIT" \
   --from-literal=openai-api-key="$OPENAI_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
@@ -98,7 +103,9 @@ kubectl -n "$NS" run eiraos-migrate --rm -i --restart=Never \
           {\"name\": \"APP_ENV\", \"value\": \"staging\"},
           {\"name\": \"DATABASE_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"database-url\"}}},
           {\"name\": \"SECRET_KEY\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"jwt-secret-key\"}}},
-          {\"name\": \"REDIS_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"redis-url\"}}}
+          {\"name\": \"REDIS_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"redis-url\"}}},
+          {\"name\": \"USER_TOKEN_BUDGET_LIMIT\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"user-token-budget-limit\"}}},
+          {\"name\": \"ORGANIZATION_TOKEN_BUDGET_LIMIT\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"organization-token-budget-limit\"}}}
         ]
       }],
       \"restartPolicy\": \"Never\"

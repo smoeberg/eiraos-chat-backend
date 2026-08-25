@@ -71,6 +71,11 @@ from eiraos.application.context_construction import (
     DeterministicContextCompactor,
 )
 from eiraos.application.providers.capability_discovery import model_metadata
+from eiraos.domains.usage.execution_budget import ExecutionBudget as DistributedExecutionBudget
+from eiraos.domains.usage.redis_reservation import (
+    BudgetBackendUnavailable, BudgetReservationDenied, RedisUsageReservation,
+)
+from redis.asyncio import Redis
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -285,6 +290,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     reserved_idem = IdempotencyReservation(None, None)
     budgeted_execution = None
     persisted_execution: PersistedChatExecution | None = None
+    execution_id: str | None = None
     persistence = ChatPersistenceContract(db)
     governance_audit = GovernanceAuditTrail(db)
     governance_decision_id: str | None = None
@@ -350,9 +356,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         )
 
     async def reserve_idempotency() -> IdempotencyReservation:
-        nonlocal reserved_idem
+        nonlocal reserved_idem, execution_id
         key = idempotency.resolve_idempotency_key(request, payload.idempotency_key)
         if not key:
+            execution_id = execution_identity(
+                organization_id=org_id, user_id=current_user["user_id"],
+                idempotency_key=None,
+            )
             return reserved_idem
         outcome = await idempotency.begin_idempotency(db, request, key)
         if outcome.status == "completed":
@@ -368,25 +378,56 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             key=key, lease_token=outcome.lease_token, record_id=outcome.record_id,
             is_recovery=outcome.is_recovery,
         )
+        execution_id = execution_identity(
+            organization_id=org_id,
+            user_id=current_user["user_id"],
+            idempotency_key=key,
+            idempotency_record_id=outcome.record_id,
+        )
         if outcome.is_recovery and outcome.record_id is not None:
             await persistence.assert_recovery_allowed(
-                execution_id=execution_identity(
-                    organization_id=org_id,
-                    user_id=current_user["user_id"],
-                    idempotency_key=key,
-                    idempotency_record_id=outcome.record_id,
-                ),
+                execution_id=execution_id,
                 idempotency_record_id=outcome.record_id,
                 lease_token=outcome.lease_token,
             )
         return reserved_idem
 
-    def reserve_budget(_authorized: _AuthorizedChat) -> None:
+    async def reserve_budget(_authorized: _AuthorizedChat) -> None:
         nonlocal budgeted_execution
-        budgeted_execution = _execution_budget().reserve(
-            user_id=current_user["user_id"], organization_id=org_id,
-            prompt=payload.prompt, verify=payload.verify,
-        )
+        if not settings.REDIS_URL:
+            if settings.APP_ENV != "development":
+                raise BudgetUnavailable("Distributed token budget is unavailable.")
+            budgeted_execution = _execution_budget().reserve(
+                user_id=current_user["user_id"], organization_id=org_id,
+                prompt=payload.prompt, verify=payload.verify,
+            )
+            return
+        if execution_id is None:
+            raise PersistenceConflict("execution identity is missing")
+        if (
+            settings.USER_TOKEN_BUDGET_LIMIT is None
+            or settings.ORGANIZATION_TOKEN_BUDGET_LIMIT is None
+        ):
+            raise BudgetUnavailable("Explicit token budget limits are required.")
+        redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            budgeted_execution = await DistributedExecutionBudget(
+                CostEstimator(), RedisUsageReservation(redis)
+            ).reserve(
+                reservation_id=execution_id,
+                user_id=current_user["user_id"],
+                organization_id=org_id,
+                prompt=payload.prompt,
+                verify=payload.verify,
+                user_limit=settings.USER_TOKEN_BUDGET_LIMIT,
+                organization_limit=settings.ORGANIZATION_TOKEN_BUDGET_LIMIT,
+            )
+        except BudgetReservationDenied as exc:
+            raise BudgetExceeded("Token budget exceeded.") from exc
+        except BudgetBackendUnavailable as exc:
+            raise BudgetUnavailable("Distributed token budget is unavailable.") from exc
+        finally:
+            await redis.aclose()
 
     async def prepare_provider(authorized: _AuthorizedChat) -> _ProviderContext:
         provider = await _provider_for_bot(
@@ -430,12 +471,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         nonlocal persisted_execution
         if budgeted_execution is None:
             raise PersistenceConflict("budget reservation is missing")
+        if execution_id is None:
+            raise PersistenceConflict("execution identity is missing")
         persisted_execution = await persistence.prepare_exchange(
-            execution_id=execution_identity(
-                organization_id=org_id, user_id=current_user["user_id"],
-                idempotency_key=reserved_idem.key,
-                idempotency_record_id=reserved_idem.record_id,
-            ),
+            execution_id=execution_id,
             request_id=getattr(request.state, "request_id", "unknown"),
             conversation_id=authorized.conversation.id,
             organization_id=org_id,
@@ -447,7 +486,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             prompt=payload.prompt,
             idempotency_record_id=reserved_idem.record_id,
             estimated_tokens=budgeted_execution.estimate.total_tokens,
-            estimated_cost=budgeted_execution.reservation.total_reserved_cost,
+            estimated_cost=0.0,
             verification=payload.verify,
             recover=reserved_idem.is_recovery,
             lease_token=reserved_idem.lease_token,
@@ -466,6 +505,21 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     async def fail_preflight(
         status_code: int, failure_code: FailureCode = FailureCode.PROVIDER_FAILURE,
     ) -> None:
+        if (
+            persisted_execution is None
+            and budgeted_execution is not None
+            and hasattr(budgeted_execution, "tenant")
+            and settings.REDIS_URL
+        ):
+            redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            try:
+                await RedisUsageReservation(redis).release_tenant(
+                    budgeted_execution.tenant
+                )
+            except BudgetBackendUnavailable:
+                pass
+            finally:
+                await redis.aclose()
         if persisted_execution is not None:
             try:
                 await persistence.finalize(
