@@ -3,7 +3,7 @@
 # Run on a machine with: docker, kubectl, registry auth, cluster context.
 #
 # Required env:
-#   DATABASE_URL, REDIS_URL, SECRET_KEY
+#   DATABASE_URL, REDIS_URL, SECRET_KEY, TRUSTED_PROXY_CIDRS
 # Optional:
 #   REGISTRY, IMAGE_NAME, NS, OPENAI_API_KEY, CORS_ORIGINS, TRUSTED_HOSTS,
 #   BASE_URL, EMAIL, PASSWORD
@@ -12,6 +12,7 @@
 #   export DATABASE_URL=postgresql+asyncpg://...
 #   export REDIS_URL=redis://...
 #   export SECRET_KEY="$(openssl rand -hex 32)"
+#   export TRUSTED_PROXY_CIDRS=10.20.0.0/16  # actual ingress CIDR(s)
 #   ./deploy/staging_deploy.sh
 set -euo pipefail
 

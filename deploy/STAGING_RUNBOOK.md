@@ -13,6 +13,7 @@ git pull origin main
 export DATABASE_URL='postgresql+asyncpg://...'
 export REDIS_URL='redis://...'
 export SECRET_KEY="$(openssl rand -hex 32)"
+export TRUSTED_PROXY_CIDRS='10.20.0.0/16' # replace with the actual ingress CIDR(s)
 # optional: REGISTRY, NS, DEPLOY_NAME, BASE_URL, EMAIL, PASSWORD
 chmod +x deploy/staging_deploy.sh
 ./deploy/staging_deploy.sh
@@ -31,6 +32,7 @@ Validated with `bash -n` (LF line endings, complete `if`/`fi` blocks).
 | Namespace | `eiraos-staging` |
 | Image registry | `ghcr.io/<org>/eiraos-chat-backend` |
 | Secrets | `SECRET_KEY`, `DATABASE_URL`, `REDIS_URL`, provider keys |
+| Ingress identity | Actual ingress CIDR(s) in `TRUSTED_PROXY_CIDRS` |
 | Postgres | pgvector-enabled 16+ |
 | Redis | 7+ |
 

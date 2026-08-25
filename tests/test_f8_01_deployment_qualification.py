@@ -28,10 +28,31 @@ def test_release_image_installs_package_from_source_before_runtime_stage():
     assert "PYTHONPATH" not in runtime
 
 
+def test_env_example_documents_complete_production_contract():
+    values = {}
+    for raw_line in read(".env.example").splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            values[key] = value
+
+    required = {
+        "APP_ENV", "RELEASE_SHA", "DATABASE_URL", "SECRET_KEY", "REDIS_URL",
+        "CORS_ORIGINS", "TRUSTED_HOSTS", "TRUSTED_PROXY_CIDRS",
+    }
+    assert required <= values.keys()
+    assert values["APP_ENV"] == "production"
+    assert values["REDIS_URL"].startswith(("redis://", "rediss://"))
+    assert values["CORS_ORIGINS"].startswith("https://")
+    assert values["TRUSTED_PROXY_CIDRS"] == "replace-with-ingress-proxy-cidr"
+    assert values["SECRET_KEY"] == "change-me"
+
+
 def test_compose_uses_validated_production_settings_for_api_and_worker():
     compose = read("docker-compose.yml")
     assert compose.count("APP_ENV: production") == 2
     assert compose.count("REDIS_URL: redis://redis:6379/0") == 2
+    assert compose.count("RELEASE_SHA: ${RELEASE_SHA:?RELEASE_SHA must be set}") == 2
     assert "REDIS_HOST" not in compose and "REDIS_PORT" not in compose
     assert sum(line.strip().startswith("CORS_ORIGINS:") for line in compose.splitlines()) == 2
     assert sum(line.strip().startswith("TRUSTED_HOSTS:") for line in compose.splitlines()) == 2
