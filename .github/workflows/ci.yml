@@ -61,13 +61,14 @@ jobs:
           PYTHONPATH: .
         run: |
           pytest tests/ -q --tb=short \
-            -k "not postgres_concurrency"
+            -k "not postgres_concurrency and not postgres_qualification"
 
-      - name: Postgres idempotency concurrency tests
+      - name: Postgres concurrency and recovery qualification
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos_test
           SECRET_KEY: test-secret-key-not-for-production-use-32b
           APP_ENV: development
           PYTHONPATH: .
         run: |
-          pytest tests/test_idempotency_postgres_concurrency.py -v --tb=short
+          pytest tests/test_idempotency_postgres_concurrency.py \
+            tests/test_f8_02_postgres_qualification.py -v --tb=short
