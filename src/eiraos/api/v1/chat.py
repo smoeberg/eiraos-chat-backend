@@ -23,6 +23,12 @@ from eiraos.core.usage_budget import BudgetExceeded, BudgetUnavailable, UsageBud
 from eiraos.application.usage_execution import ProviderExecutionBudget
 from eiraos.domains.usage.cost_estimator import CostEstimator
 from eiraos.application.chat_execution import ChatExecutionBoundary, IdempotencyReservation
+from eiraos.application.chat_persistence import (
+    ChatPersistenceContract,
+    PersistedChatExecution,
+    PersistenceConflict,
+    execution_identity,
+)
 from eiraos.application.streaming_lifecycle import (
     StreamEventKind,
     StreamFinalizer,
@@ -161,20 +167,6 @@ async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt
     return messages
 
 
-async def _transition_assistant(db: AsyncSession, asst_id: int | None, conversation_id: int, bot_id: int,
-                                content: str, status_value: str) -> None:
-    if asst_id is not None:
-        row = (await db.execute(select(Message).where(Message.id == asst_id))).scalars().first()
-        if row is not None:
-            row.content = content
-            row.status = status_value
-            await db.commit()
-            return
-    db.add(Message(conversation_id=conversation_id, role="assistant", content=content, bot_id=bot_id,
-                   status=status_value, ai_marked=True))
-    await db.commit()
-
-
 def _bot_accessible(bot: Bot, org_id: int) -> bool:
     if bot.organization_id is not None and bot.organization_id == org_id:
         return True
@@ -251,6 +243,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                                  org_id: int = Depends(get_current_active_organization),
                                  db: AsyncSession = Depends(get_db)):
     reserved_idem = IdempotencyReservation(None, None)
+    budgeted_execution = None
+    persisted_execution: PersistedChatExecution | None = None
+    persistence = ChatPersistenceContract(db)
 
     async def authorize() -> _AuthorizedChat:
         conversation = (await db.execute(select(Conversation).where(
@@ -274,13 +269,19 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         if outcome.status == "completed":
             cached = await idempotency.read_cached_response(db, request, key)
             if cached is not None:
-                reserved_idem = IdempotencyReservation(key, None, json.loads(cached))
+                reserved_idem = IdempotencyReservation(
+                    key=key, lease_token=None, cached_response=json.loads(cached),
+                    record_id=outcome.record_id,
+                )
                 return reserved_idem
-        reserved_idem = IdempotencyReservation(key, outcome.lease_token)
+        reserved_idem = IdempotencyReservation(
+            key=key, lease_token=outcome.lease_token, record_id=outcome.record_id,
+        )
         return reserved_idem
 
     def reserve_budget(_authorized: _AuthorizedChat) -> None:
-        _execution_budget().reserve(
+        nonlocal budgeted_execution
+        budgeted_execution = _execution_budget().reserve(
             user_id=current_user["user_id"], organization_id=org_id,
             prompt=payload.prompt, verify=payload.verify,
         )
@@ -297,11 +298,27 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         return _ProviderContext(provider, messages, system_prompt)
 
     async def persist_request(authorized: _AuthorizedChat) -> None:
-        db.add(Message(
-            conversation_id=authorized.conversation.id, role="user", content=payload.prompt,
-            bot_id=authorized.bot.id, status="completed", ai_marked=False,
-        ))
-        await db.commit()
+        nonlocal persisted_execution
+        if budgeted_execution is None:
+            raise PersistenceConflict("budget reservation is missing")
+        persisted_execution = await persistence.prepare_exchange(
+            execution_id=execution_identity(
+                organization_id=org_id, user_id=current_user["user_id"],
+                idempotency_key=reserved_idem.key,
+            ),
+            request_id=getattr(request.state, "request_id", "unknown"),
+            conversation_id=authorized.conversation.id,
+            organization_id=org_id,
+            user_id=current_user["user_id"],
+            bot_id=authorized.bot.id,
+            provider=authorized.bot.provider,
+            model=authorized.bot.model,
+            prompt=payload.prompt,
+            idempotency_record_id=reserved_idem.record_id,
+            estimated_tokens=budgeted_execution.estimate.total_tokens,
+            estimated_cost=budgeted_execution.reservation.total_reserved_cost,
+            verification=payload.verify,
+        )
 
     boundary = ChatExecutionBoundary(
         authorize=authorize,
@@ -310,20 +327,39 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         prepare_provider=prepare_provider,
         persist_request=persist_request,
     )
+
+    async def fail_preflight(status_code: int) -> None:
+        if persisted_execution is not None:
+            try:
+                await persistence.finalize(
+                    execution_id=persisted_execution.execution_id,
+                    terminal_status="failed",
+                    content="",
+                    response_status=status_code,
+                    response_reference="failed",
+                    lease_token=reserved_idem.lease_token,
+                )
+            except PersistenceConflict:
+                pass
+            return
+        await _release_preflight_lease(
+            db, request, reserved_idem.key, reserved_idem.lease_token, status_code,
+        )
+
     prepared = None
     try:
         prepared = await boundary.prepare()
     except BudgetExceeded as exc:
-        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 429)
+        await fail_preflight(429)
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Execution budget exceeded.") from exc
     except BudgetUnavailable as exc:
-        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 503)
+        await fail_preflight(503)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution budget unavailable.") from exc
     except HTTPException as exc:
-        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, exc.status_code)
+        await fail_preflight(exc.status_code)
         raise
     except Exception as exc:
-        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 500)
+        await fail_preflight(500)
         raise HTTPException(status_code=500, detail="AI provider could not be initialized.") from exc
 
     if prepared.is_replay:
@@ -331,12 +367,15 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     authorized = prepared.authorized
     provider_context = prepared.provider_context
     assert authorized is not None and provider_context is not None
+    assert persisted_execution is not None
     conversation, bot = authorized.conversation, authorized.bot
     provider = provider_context.provider
     provider_messages = provider_context.messages
     effective_system_prompt = provider_context.system_prompt
     idem_key = prepared.idempotency.key
     lease_token = prepared.idempotency.lease_token
+    execution_id = persisted_execution.execution_id
+    assistant_message_id = persisted_execution.assistant_message_id
 
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
@@ -362,31 +401,40 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 verification_reason = result.reason
             if lease_lost is not None and lease_lost.is_set():
                 raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
-            db.add(Message(conversation_id=conversation.id, role="assistant", content=full_response, bot_id=bot.id,
-                           status="completed", ai_marked=True))
-            await db.commit()
             response_payload = {"role": "assistant", "content": full_response, "ai_marked": True,
                                 "verified": verified, "verification_status": verification_status,
                                 "verification_reason": verification_reason}
-            if idem_key:
-                if not await idempotency.complete_idempotency(db, request, idem_key, status.HTTP_200_OK,
-                                                              json.dumps(response_payload), lease_token=lease_token):
-                    raise HTTPException(status_code=409, detail="Idempotency lease was lost before completion.")
+            if not await persistence.finalize(
+                execution_id=execution_id,
+                terminal_status="completed",
+                content=full_response,
+                response_status=status.HTTP_200_OK,
+                response_reference=json.dumps(response_payload),
+                lease_token=lease_token,
+            ):
+                raise HTTPException(status_code=409, detail="Execution was already finalized.")
             return response_payload
         except HTTPException:
-            if idem_key:
-                await idempotency.complete_idempotency(db, request, idem_key, 409, "failed", lease_token=lease_token)
+            await persistence.finalize(
+                execution_id=execution_id, terminal_status="failed", content="",
+                response_status=409, response_reference="failed", lease_token=lease_token,
+            )
             raise
         except Exception:
-            if idem_key:
-                await idempotency.complete_idempotency(db, request, idem_key, 500, "failed", lease_token=lease_token)
+            try:
+                await persistence.finalize(
+                    execution_id=execution_id, terminal_status="failed", content="",
+                    response_status=500, response_reference="failed", lease_token=lease_token,
+                )
+            except PersistenceConflict:
+                pass
             raise HTTPException(status_code=502, detail="AI provider could not fulfil the request.")
         finally:
             await _stop_lease_heartbeat(heartbeat_task, lease_lost)
 
     async def event_generator() -> AsyncIterator[str]:
         accumulated = ""
-        asst_id = None
+        asst_id = assistant_message_id
         verified = False
         verification_status = None
         verification_reason = None
@@ -395,35 +443,30 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
 
         async def apply_terminal(terminal: StreamTerminal, content: str) -> None:
-            status_value = terminal.value
-            await _transition_assistant(db, asst_id, conversation.id, bot.id, content, status_value)
-            if not idem_key:
-                return
             if terminal is StreamTerminal.COMPLETED:
                 response_payload = {
                     "role": "assistant", "content": content, "ai_marked": True,
                     "verified": verified, "verification_status": verification_status,
                     "verification_reason": verification_reason,
                 }
-                completed = await idempotency.complete_idempotency(
-                    db, request, idem_key, 200, json.dumps(response_payload), lease_token=lease_token,
+                completed = await persistence.finalize(
+                    execution_id=execution_id, terminal_status=terminal.value, content=content,
+                    response_status=200, response_reference=json.dumps(response_payload),
+                    lease_token=lease_token,
                 )
                 if not completed:
-                    raise RuntimeError("idempotency lease was lost before completion")
+                    raise RuntimeError("execution was already finalized")
                 return
             failure_status = 499 if terminal is StreamTerminal.CANCELLED else 500
-            await idempotency.complete_idempotency(
-                db, request, idem_key, failure_status, "failed", lease_token=lease_token,
+            await persistence.finalize(
+                execution_id=execution_id, terminal_status=terminal.value, content=content,
+                response_status=failure_status, response_reference="failed", lease_token=lease_token,
             )
 
         finalizer = StreamFinalizer(apply_terminal)
         try:
-            pending = Message(conversation_id=conversation.id, role="assistant", content="", bot_id=bot.id,
-                              status="streaming", ai_marked=True)
-            db.add(pending)
-            await db.commit()
-            await db.refresh(pending)
-            asst_id = pending.id
+            if not await persistence.mark_streaming(execution_id):
+                raise RuntimeError("execution was already finalized")
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
             stream = provider.stream_chat_completion(model=bot.model, messages=provider_messages,
                                                      system_prompt=effective_system_prompt)

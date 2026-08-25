@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eiraos.core.database import Base
@@ -15,6 +15,9 @@ class ProviderUsageRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     request_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     execution_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    chat_execution_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("chat_executions.id"), nullable=True, index=True,
+    )
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     organization_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -10,8 +10,8 @@ Every chat completion follows this order:
 2. tenant-scoped authorization
 3. idempotency reservation or replay
 4. usage-budget reservation
-5. provider/context preparation
-6. request persistence
+5. request/execution persistence
+6. provider/context preparation
 7. provider execution (complete or stream)
 8. result persistence
 9. idempotency finalization
@@ -31,6 +31,5 @@ lease/cancellation/finalization mechanics are deliberately F2-05 scope.
 - authorization failure: no idempotency, budget, provider or persistence side effects
 - idempotency conflict: no budget, provider or persistence side effects
 - budget denial/unavailability: no provider or message persistence side effects
-- provider preparation failure: an acquired idempotency lease is released by the adapter
+- provider preparation failure: the durable execution is finalized failed by the adapter
 - replay: cached response is returned without charging or writing again
-

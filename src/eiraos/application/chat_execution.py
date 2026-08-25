@@ -13,6 +13,7 @@ class IdempotencyReservation:
     key: str | None
     lease_token: str | None
     cached_response: dict[str, Any] | None = None
+    record_id: int | None = None
 
     @property
     def is_replay(self) -> bool:
@@ -60,11 +61,10 @@ class ChatExecutionBoundary(Generic[TAuthorized, TProvider]):
                 cached_response=idem.cached_response,
             )
         self._reserve_budget(authorized)
-        provider_context = await self._prepare_provider(authorized)
         await self._persist_request(authorized)
+        provider_context = await self._prepare_provider(authorized)
         return PreparedChatExecution(
             authorized=authorized,
             provider_context=provider_context,
             idempotency=idem,
         )
-
