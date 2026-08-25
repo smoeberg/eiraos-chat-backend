@@ -43,3 +43,8 @@ class ExecutionBudget:
             ttl_seconds=self.ttl_seconds,
         )
         return ExecutionReservation(estimate=estimate, tenant=tenant)
+
+    async def settle(self, reservation: ExecutionReservation, *, actual_tokens: int) -> bool:
+        return await self.reservations.settle_tenant(
+            reservation.tenant, actual_amount=actual_tokens,
+        )

@@ -71,6 +71,7 @@ from eiraos.application.context_construction import (
     DeterministicContextCompactor,
 )
 from eiraos.application.providers.capability_discovery import model_metadata
+from eiraos.application.providers.base import ProviderCompletion
 from eiraos.domains.usage.execution_budget import ExecutionBudget as DistributedExecutionBudget
 from eiraos.domains.usage.redis_reservation import (
     BudgetBackendUnavailable, BudgetReservationDenied, RedisUsageReservation,
@@ -615,6 +616,34 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             system_prompt=effective_system_prompt,
         )
 
+    async def settle_primary_usage(usage) -> None:
+        if usage is None or not hasattr(budgeted_execution, "tenant"):
+            return
+        entry = accountant.account_reported(
+            provider=bot.provider, model=bot.model, operation="primary",
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+        )
+        accounting_entries.append(entry)
+        redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await DistributedExecutionBudget(
+                CostEstimator(), RedisUsageReservation(redis)
+            ).settle(budgeted_execution, actual_tokens=usage.total_tokens)
+        except (BudgetBackendUnavailable, BudgetReservationDenied) as exc:
+            raise BudgetUnavailable("Provider usage reconciliation failed.") from exc
+        finally:
+            await redis.aclose()
+
+    async def complete_primary() -> ProviderCompletion:
+        method = getattr(provider, "complete_with_usage", None)
+        kwargs = dict(
+            model=bot.model, messages=provider_messages,
+            system_prompt=effective_system_prompt,
+        )
+        if method is not None:
+            return await method(**kwargs)
+        return ProviderCompletion(text=await provider.complete(**kwargs))
+
     async def finalize_failure(code: FailureCode, content: str = "") -> bool:
         policy = failure_policy(code)
         if not any(entry.operation == "primary" for entry in accounting_entries):
@@ -635,16 +664,17 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
-            full_response = await provider_isolation.execute(
-                provider.complete(
-                    model=bot.model, messages=provider_messages,
-                    system_prompt=effective_system_prompt,
-                ),
+            completion = await provider_isolation.execute(
+                complete_primary(),
                 settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
-                validate=require_text,
+                validate=lambda result: require_text(result.text),
             )
+            full_response = completion.text
             primary_response = full_response
-            accounting_entries.append(account_primary(primary_response))
+            if completion.usage is None:
+                accounting_entries.append(account_primary(primary_response))
+            else:
+                await settle_primary_usage(completion.usage)
             if lease_lost is not None and lease_lost.is_set():
                 raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
             verified = False
@@ -752,6 +782,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         stream_failure_code = FailureCode.PROVIDER_FAILURE
         primary_content = None
         verifier_accounting_context = None
+        stream_usage = None
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
 
         async def apply_terminal(terminal: StreamTerminal, content: str) -> None:
@@ -785,10 +816,26 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             if not await persistence.mark_streaming(execution_id):
                 raise RuntimeError("execution was already finalized")
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
-            stream = provider_isolation.stream(provider.stream(
-                model=bot.model, messages=provider_messages,
-                system_prompt=effective_system_prompt,
-            ))
+            async def provider_text_stream():
+                nonlocal stream_usage
+                method = getattr(provider, "stream_with_usage", None)
+                kwargs = dict(
+                    model=bot.model, messages=provider_messages,
+                    system_prompt=effective_system_prompt,
+                )
+                if method is None:
+                    async for text in provider.stream(**kwargs):
+                        yield text
+                    return
+                async for event in method(**kwargs):
+                    if event.usage is not None:
+                        if stream_usage is not None:
+                            raise RuntimeError("provider emitted duplicate stream usage")
+                        stream_usage = event.usage
+                    elif event.text is not None:
+                        yield event.text
+
+            stream = provider_isolation.stream(provider_text_stream())
             pump = StreamPump(
                 stream,
                 is_disconnected=request.is_disconnected,
@@ -817,6 +864,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             await pump.aclose()
             pump = None
             primary_content = accumulated
+            if stream_usage is not None:
+                await settle_primary_usage(stream_usage)
 
             if payload.verify:
                 async def run_verification() -> VerificationResult:

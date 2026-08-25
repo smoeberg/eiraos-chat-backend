@@ -7,6 +7,36 @@ ChatMessage = Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    input_tokens: int
+    output_tokens: int
+
+    def __post_init__(self) -> None:
+        if self.input_tokens < 0 or self.output_tokens < 0:
+            raise ValueError("provider usage cannot be negative")
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCompletion:
+    text: str
+    usage: ProviderUsage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderStreamEvent:
+    text: str | None = None
+    usage: ProviderUsage | None = None
+
+    def __post_init__(self) -> None:
+        if (self.text is None) == (self.usage is None):
+            raise ValueError("stream event must contain exactly one payload")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
     streaming: bool
     vision: bool = False
