@@ -39,6 +39,11 @@ from eiraos.application.streaming_lifecycle import (
     StreamPump,
     StreamTerminal,
 )
+from eiraos.application.provider_execution_policy import (
+    ProviderExecutionPermit,
+    ProviderPolicyDenied,
+    authorize_provider_execution,
+)
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -83,6 +88,7 @@ class _AuthorizedChat:
     conversation: Conversation
     bot: Bot
     knowledge_scope: str | None
+    provider_permit: ProviderExecutionPermit
 
 
 @dataclass(frozen=True)
@@ -196,22 +202,29 @@ def _valid_knowledge_scope(value: str | None) -> str | None:
     return scope
 
 
-async def _find_verifier_bot(db: AsyncSession, primary_bot: Bot, org_id: int) -> Bot:
+async def _find_verifier_bot(
+    db: AsyncSession, primary_bot: Bot, org_id: int, authorization,
+) -> tuple[Bot, ProviderExecutionPermit]:
     candidates = (await db.execute(select(Bot).where(Bot.id != primary_bot.id).order_by(Bot.id.asc()))).scalars().all()
     for candidate in candidates:
         if not _verifier_bot_accessible(candidate, org_id) or not candidate.provider or not candidate.model:
             continue
         try:
-            SecretService.resolve(candidate.organization_id, candidate.secret_reference, None,
-                                  credential_scope=getattr(candidate, "credential_scope", "organization") or "organization",
-                                  caller_org_id=org_id)
-        except Exception:
+            permit = authorize_provider_execution(
+                authorization=authorization, bot=candidate, caller_organization_id=org_id,
+            )
+        except ProviderPolicyDenied:
             continue
-        return candidate
-    return primary_bot
+        return candidate, permit
+    if not _verifier_bot_accessible(primary_bot, org_id):
+        raise ProviderPolicyDenied("verifier_tenant_mismatch")
+    return primary_bot, authorize_provider_execution(
+        authorization=authorization, bot=primary_bot, caller_organization_id=org_id,
+    )
 
 
-async def _provider_for_bot(bot: Bot, org_id: int):
+async def _provider_for_bot(bot: Bot, org_id: int, permit: ProviderExecutionPermit):
+    permit.assert_matches(bot=bot, caller_organization_id=org_id)
     api_key = SecretService.resolve(bot.organization_id, bot.secret_reference, None,
                                     credential_scope=getattr(bot, "credential_scope", "organization") or "organization",
                                     caller_org_id=org_id)
@@ -262,7 +275,17 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         bot = (await db.execute(select(Bot).where(Bot.id == payload.bot_id))).scalars().first()
         if not bot or not _bot_accessible(bot, org_id):
             raise HTTPException(status_code=404, detail="Bot not found or access denied")
-        return _AuthorizedChat(conversation, bot, _valid_knowledge_scope(payload.knowledge_scope))
+        try:
+            permit = authorize_provider_execution(
+                authorization=current_user["authorization"],
+                bot=bot,
+                caller_organization_id=org_id,
+            )
+        except ProviderPolicyDenied as exc:
+            raise HTTPException(status_code=403, detail="Provider execution is not permitted.") from exc
+        return _AuthorizedChat(
+            conversation, bot, _valid_knowledge_scope(payload.knowledge_scope), permit,
+        )
 
     async def reserve_idempotency() -> IdempotencyReservation:
         nonlocal reserved_idem
@@ -304,7 +327,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         )
 
     async def prepare_provider(authorized: _AuthorizedChat) -> _ProviderContext:
-        provider = await _provider_for_bot(authorized.bot, org_id)
+        provider = await _provider_for_bot(
+            authorized.bot, org_id, authorized.provider_permit,
+        )
         knowledge_context = await _knowledge_context(
             db, org_id, payload.prompt, authorized.knowledge_scope,
         )
@@ -449,8 +474,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             verification_reason = None
             if payload.verify:
                 try:
-                    verifier_bot = await _find_verifier_bot(db, bot, org_id)
-                    verifier = await _provider_for_bot(verifier_bot, org_id)
+                    verifier_bot, verifier_permit = await _find_verifier_bot(
+                        db, bot, org_id, current_user["authorization"],
+                    )
+                    verifier = await _provider_for_bot(verifier_bot, org_id, verifier_permit)
                     result = await provider_with_timeout(
                         verify_answer(
                             primary_answer=full_response,
@@ -597,8 +624,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             if payload.verify:
                 async def run_verification() -> VerificationResult:
                     try:
-                        verifier_bot = await _find_verifier_bot(db, bot, org_id)
-                        verifier = await _provider_for_bot(verifier_bot, org_id)
+                        verifier_bot, verifier_permit = await _find_verifier_bot(
+                            db, bot, org_id, current_user["authorization"],
+                        )
+                        verifier = await _provider_for_bot(verifier_bot, org_id, verifier_permit)
                         return await provider_with_timeout(
                             verify_answer(
                                 primary_answer=accumulated,
