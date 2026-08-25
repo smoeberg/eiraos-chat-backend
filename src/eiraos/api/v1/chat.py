@@ -44,6 +44,11 @@ from eiraos.application.provider_execution_policy import (
     ProviderPolicyDenied,
     authorize_provider_execution,
 )
+from eiraos.application.governance_audit import (
+    GovernanceAuditTrail,
+    GovernanceAuditUnavailable,
+    request_fingerprint,
+)
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -89,6 +94,7 @@ class _AuthorizedChat:
     bot: Bot
     knowledge_scope: str | None
     provider_permit: ProviderExecutionPermit
+    governance_decision_id: str
 
 
 @dataclass(frozen=True)
@@ -263,8 +269,12 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     budgeted_execution = None
     persisted_execution: PersistedChatExecution | None = None
     persistence = ChatPersistenceContract(db)
+    governance_audit = GovernanceAuditTrail(db)
+    governance_decision_id: str | None = None
+    request_hash = request_fingerprint(getattr(request.state, "cached_body", b""))
 
     async def authorize() -> _AuthorizedChat:
+        nonlocal governance_decision_id
         conversation = (await db.execute(select(Conversation).where(
             Conversation.id == payload.conversation_id,
             Conversation.organization_id == org_id,
@@ -282,9 +292,40 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 caller_organization_id=org_id,
             )
         except ProviderPolicyDenied as exc:
+            try:
+                await governance_audit.record_provider_decision(
+                    request_id=getattr(request.state, "request_id", "unknown"),
+                    request_hash=request_hash,
+                    authorization=current_user["authorization"],
+                    bot_id=bot.id,
+                    bot_organization_id=bot.organization_id,
+                    allowed=False,
+                    reason=exc.reason,
+                    provider=getattr(bot, "provider", None),
+                    model=getattr(bot, "model", None),
+                    permit=None,
+                )
+            except GovernanceAuditUnavailable as audit_exc:
+                raise HTTPException(status_code=503, detail="Governance audit is unavailable.") from audit_exc
             raise HTTPException(status_code=403, detail="Provider execution is not permitted.") from exc
+        try:
+            governance_decision_id = await governance_audit.record_provider_decision(
+                request_id=getattr(request.state, "request_id", "unknown"),
+                request_hash=request_hash,
+                authorization=current_user["authorization"],
+                bot_id=bot.id,
+                bot_organization_id=bot.organization_id,
+                allowed=True,
+                reason="granted",
+                provider=permit.provider,
+                model=permit.model,
+                permit=permit,
+            )
+        except GovernanceAuditUnavailable as exc:
+            raise HTTPException(status_code=503, detail="Governance audit is unavailable.") from exc
         return _AuthorizedChat(
             conversation, bot, _valid_knowledge_scope(payload.knowledge_scope), permit,
+            governance_decision_id,
         )
 
     async def reserve_idempotency() -> IdempotencyReservation:
@@ -365,6 +406,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             recover=reserved_idem.is_recovery,
             lease_token=reserved_idem.lease_token,
             max_attempts=settings.CHAT_MAX_ATTEMPTS,
+            governance_decision_id=authorized.governance_decision_id,
         )
 
     boundary = ChatExecutionBoundary(
@@ -392,6 +434,16 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             except (PersistenceConflict, PersistenceUnavailable):
                 pass
             return
+        if governance_decision_id is not None:
+            try:
+                await governance_audit.record_result(
+                    governance_decision_id,
+                    result_status="preflight_failed",
+                    response_status=status_code,
+                    failure_code=failure_code.value,
+                )
+            except GovernanceAuditUnavailable as exc:
+                raise HTTPException(status_code=503, detail="Governance audit is unavailable.") from exc
         try:
             await _release_preflight_lease(
                 db, request, reserved_idem.key, reserved_idem.lease_token, status_code,
@@ -431,6 +483,12 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         raise HTTPException(status_code=500, detail="AI provider could not be initialized.") from exc
 
     if prepared.is_replay:
+        if governance_decision_id is not None:
+            await governance_audit.record_result(
+                governance_decision_id,
+                result_status="replayed",
+                response_status=200,
+            )
         return prepared.cached_response
     authorized = prepared.authorized
     provider_context = prepared.provider_context

@@ -5,8 +5,10 @@ from eiraos.domains.agents.models import Bot
 from eiraos.domains.prompts.models import PromptTemplate
 from eiraos.domains.idempotency.models import IdempotencyRecord
 from eiraos.domains.usage.models import ProviderUsageRecord
+from eiraos.domains.governance.models import GovernanceDecisionRecord
 
 __all__ = [
     "Bot", "ChatExecution", "Conversation", "IdempotencyRecord", "Message",
-    "Organization", "OrganizationMember", "PromptTemplate", "ProviderUsageRecord", "User",
+    "GovernanceDecisionRecord", "Organization", "OrganizationMember", "PromptTemplate",
+    "ProviderUsageRecord", "User",
 ]
