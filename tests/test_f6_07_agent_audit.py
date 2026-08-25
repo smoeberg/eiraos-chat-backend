@@ -165,4 +165,4 @@ async def test_untrusted_reason_code_is_not_returned_or_persisted(session):
 
 def test_agent_audit_migration_is_single_head():
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert scripts.get_heads() == ["012_agent_audit"]
+    assert scripts.get_heads() == ["013_document_chunk_tenant_fk"]
