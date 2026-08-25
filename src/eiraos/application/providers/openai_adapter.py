@@ -2,7 +2,7 @@ from typing import List, Dict, Any, AsyncIterator
 import json
 import logging
 import httpx
-from eiraos.application.providers.base import AIProviderProtocol
+from eiraos.application.providers.base import ProviderCapabilities
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.openai")
@@ -26,11 +26,13 @@ def _unpack_message(data) -> str:
 
 
 class OpenAIProviderAdapter:
+    MODEL_CATALOG = ("gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini")
+
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1"):
         self.api_key = api_key
         self.base_url = base_url
 
-    async def generate_chat_completion(
+    async def complete(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -61,7 +63,7 @@ class OpenAIProviderAdapter:
             except httpx.HTTPError as e:
                 raise EiraOSException(title="Upstream request failed", detail=f"Completion request failed (HTTP {e.response.status_code}).", status_code=502)
 
-    async def stream_chat_completion(
+    async def stream(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -104,3 +106,16 @@ class OpenAIProviderAdapter:
                         corrupt_chunks += 1
                         logger.warning("openai_stream_skipped_corrupt_chunk", extra={"skip_chunk_count": corrupt_chunks})
                         continue
+
+    def models(self) -> tuple[str, ...]:
+        return self.MODEL_CATALOG
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(streaming=True)
+
+    async def generate_chat_completion(self, *args, **kwargs) -> str:
+        return await self.complete(*args, **kwargs)
+
+    async def stream_chat_completion(self, *args, **kwargs) -> AsyncIterator[str]:
+        async for chunk in self.stream(*args, **kwargs):
+            yield chunk

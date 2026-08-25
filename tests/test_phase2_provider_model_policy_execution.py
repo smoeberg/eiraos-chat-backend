@@ -8,7 +8,7 @@ class FakeProvider:
     def __init__(self):
         self.models = []
 
-    async def generate_chat_completion(self, messages, model, temperature=0.7, max_tokens=1000, system_prompt=None):
+    async def complete(self, messages, model, temperature=0.7, max_tokens=1000, system_prompt=None):
         self.models.append(model)
         return "ok"
 
