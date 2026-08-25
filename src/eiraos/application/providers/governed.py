@@ -1,6 +1,8 @@
 from typing import AsyncIterator
 
-from eiraos.application.providers.base import ChatProvider, ProviderCapabilities
+from eiraos.application.providers.base import (
+    ChatProvider, ProviderCapabilities, ProviderCompletion, ProviderStreamEvent,
+)
 from eiraos.application.providers.policy import authorize_provider_model
 
 
@@ -33,6 +35,23 @@ class GovernedAIProvider:
             system_prompt=system_prompt,
         )
 
+    async def complete_with_usage(self, messages, model: str, temperature: float = 0.7,
+                                  max_tokens: int = 1000, system_prompt: str | None = None):
+        provider_name, authorized_model = authorize_provider_model(self._provider_name, model)
+        if provider_name != self._provider_name:
+            raise RuntimeError("Provider policy normalization mismatch")
+        method = getattr(self._provider, "complete_with_usage", None)
+        if method is None:
+            text = await self._provider.complete(
+                messages=messages, model=authorized_model, temperature=temperature,
+                max_tokens=max_tokens, system_prompt=system_prompt,
+            )
+            return ProviderCompletion(text=text)
+        return await method(
+            messages=messages, model=authorized_model, temperature=temperature,
+            max_tokens=max_tokens, system_prompt=system_prompt,
+        )
+
     async def stream(self, messages, model: str, temperature: float = 0.7,
                      max_tokens: int = 1000, system_prompt: str | None = None) -> AsyncIterator[str]:
         provider_name, authorized_model = authorize_provider_model(self._provider_name, model)
@@ -47,6 +66,21 @@ class GovernedAIProvider:
         )
         async for chunk in stream:
             yield chunk
+
+    async def stream_with_usage(self, messages, model: str, temperature: float = 0.7,
+                                max_tokens: int = 1000, system_prompt: str | None = None):
+        provider_name, authorized_model = authorize_provider_model(self._provider_name, model)
+        if provider_name != self._provider_name:
+            raise RuntimeError("Provider policy normalization mismatch")
+        method = getattr(self._provider, "stream_with_usage", None)
+        kwargs = dict(messages=messages, model=authorized_model, temperature=temperature,
+                      max_tokens=max_tokens, system_prompt=system_prompt)
+        if method is not None:
+            async for event in method(**kwargs):
+                yield event
+            return
+        async for text in self._provider.stream(**kwargs):
+            yield ProviderStreamEvent(text=text)
 
     def models(self) -> tuple[str, ...]:
         authorized = []

@@ -157,3 +157,40 @@ class RedisUsageReservation:
             )
         except Exception as exc:
             raise BudgetBackendUnavailable("budget backend unavailable") from exc
+
+    async def settle_tenant(
+        self, reservation: TenantReservation, *, actual_amount: int,
+    ) -> bool:
+        """Reconcile both counters once; return False for an identical replay."""
+        if actual_amount < 0:
+            raise ValueError("actual usage cannot be negative")
+        identity = (
+            f"{reservation.user.key}|{reservation.organization.key}|"
+            f"{reservation.user.amount}"
+        )
+        settlement_key = f"{reservation.marker_key}:settled"
+        script = """
+        if redis.call('GET', KEYS[1]) ~= ARGV[3] then return -1 end
+        local existing = redis.call('GET', KEYS[2])
+        if existing then
+            if existing == ARGV[2] then return 0 else return -2 end
+        end
+        local ttl = redis.call('PTTL', KEYS[1])
+        if ttl <= 0 then return -1 end
+        local delta = tonumber(ARGV[2]) - tonumber(ARGV[1])
+        redis.call('INCRBY', KEYS[3], delta)
+        redis.call('INCRBY', KEYS[4], delta)
+        redis.call('SET', KEYS[2], ARGV[2], 'PX', ttl)
+        return 1
+        """
+        try:
+            result = int(await self._redis.eval(
+                script, 4, reservation.marker_key, settlement_key,
+                reservation.user.key, reservation.organization.key,
+                reservation.user.amount, actual_amount, identity,
+            ))
+        except Exception as exc:
+            raise BudgetBackendUnavailable("budget backend unavailable") from exc
+        if result < 0:
+            raise BudgetReservationDenied("budget settlement identity conflict")
+        return result == 1

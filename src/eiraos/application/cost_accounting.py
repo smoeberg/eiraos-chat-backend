@@ -93,5 +93,27 @@ class ExecutionCostAccountant:
             pricing_revision=CATALOG_REVISION,
         )
 
+    def account_reported(self, *, provider: str, model: str, operation: str,
+                         input_tokens: int, output_tokens: int) -> ExecutionCost:
+        try:
+            normalized = normalize_provider(provider)
+        except Exception as exc:
+            raise CostAccountingUnavailable("provider pricing metadata is unavailable") from exc
+        metadata = self._catalog.get((normalized, model))
+        if metadata is None:
+            raise CostAccountingUnavailable("model pricing metadata is unavailable")
+        pricing = metadata.pricing
+        cost = (
+            Decimal(input_tokens) * pricing.input_per_million
+            + Decimal(output_tokens) * pricing.output_per_million
+        ) / Decimal(pricing.unit_tokens)
+        return ExecutionCost(
+            provider=normalized, model=model, operation=operation,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            cost=cost.quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP),
+            usage_source="provider_reported", pricing_revision=CATALOG_REVISION,
+        )
+
     def _tokens(self, characters: int) -> int:
         return (characters + self._chars_per_token - 1) // self._chars_per_token

@@ -2,7 +2,9 @@ from typing import List, Dict, Any, AsyncIterator
 import json
 import logging
 import httpx
-from eiraos.application.providers.base import ProviderCapabilities
+from eiraos.application.providers.base import (
+    ProviderCapabilities, ProviderCompletion, ProviderStreamEvent, ProviderUsage,
+)
 from eiraos.application.providers.http import decode_completion, normalized_base_url, post_with_retry, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
@@ -25,6 +27,15 @@ def _unpack_gemini_text(data) -> str:
         raise EiraOSException(title="Bad upstream payload", detail="Provider response had no text parts.", status_code=502)
     text = parts[0].get("text") if isinstance(parts[0], dict) else None
     return text if isinstance(text, str) else ""
+
+
+def _gemini_usage(data) -> ProviderUsage | None:
+    if not isinstance(data, dict):
+        return None
+    prompt, total = data.get("promptTokenCount"), data.get("totalTokenCount")
+    if type(prompt) is not int or type(total) is not int or total < prompt:
+        return None
+    return ProviderUsage(input_tokens=prompt, output_tokens=total - prompt)
 
 
 class GeminiProviderAdapter:
@@ -77,6 +88,30 @@ class GeminiProviderAdapter:
         except httpx.HTTPError as exc:
             raise upstream_failure("Gemini", exc) from exc
 
+    async def complete_with_usage(self, *args, **kwargs) -> ProviderCompletion:
+        messages = kwargs.get("messages", args[0] if args else None)
+        model = kwargs.get("model", args[1] if len(args) > 1 else None)
+        payload = self._payload(
+            messages, kwargs.get("temperature", 0.7), kwargs.get("max_tokens", 1000),
+            kwargs.get("system_prompt"),
+        )
+        try:
+            async with self._client(60.0) as client:
+                response = await post_with_retry(
+                    client, f"{self.base_url}/models/{model}:generateContent",
+                    provider="Gemini", headers={"x-goog-api-key": self.api_key}, json=payload,
+                )
+                data = response.json()
+                return ProviderCompletion(
+                    _unpack_gemini_text(data),
+                    _gemini_usage(
+                        data.get("usageMetadata") if isinstance(data, dict) else None
+                    ),
+                )
+        except httpx.HTTPError as exc:
+            raise upstream_failure("Gemini", exc) from exc
+
+
     async def stream(
         self,
         messages: List[Dict[str, Any]],
@@ -113,6 +148,37 @@ class GeminiProviderAdapter:
                                     yield text
         except httpx.HTTPError as exc:
             raise upstream_failure("Gemini", exc) from exc
+
+    async def stream_with_usage(self, *args, **kwargs):
+        messages = kwargs.get("messages", args[0] if args else None)
+        model = kwargs.get("model", args[1] if len(args) > 1 else None)
+        payload = self._payload(messages, kwargs.get("temperature", 0.7),
+                                kwargs.get("max_tokens", 1000), kwargs.get("system_prompt"))
+        usage = None
+        async with self._client(120.0) as client:
+            async with client.stream(
+                "POST", f"{self.base_url}/models/{model}:streamGenerateContent?alt=sse",
+                headers={"x-goog-api-key": self.api_key}, json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        chunk = json.loads(line[6:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    parsed = _gemini_usage(chunk.get("usageMetadata"))
+                    if parsed is not None:
+                        usage = parsed
+                    candidates = chunk.get("candidates") or []
+                    if candidates and isinstance(candidates[0], dict):
+                        for part in (candidates[0].get("content") or {}).get("parts", []):
+                            text = part.get("text") if isinstance(part, dict) else None
+                            if text:
+                                yield ProviderStreamEvent(text=text)
+        if usage is not None:
+            yield ProviderStreamEvent(usage=usage)
 
     def models(self) -> tuple[str, ...]:
         return self.MODEL_CATALOG

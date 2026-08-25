@@ -2,7 +2,10 @@ from typing import List, Dict, Any, AsyncIterator
 import json
 import logging
 import httpx
-from eiraos.application.providers.base import ProviderCapabilities
+from eiraos.application.providers.base import (
+    ProviderCapabilities, ProviderCompletion, ProviderStreamEvent, ProviderUsage,
+)
+from eiraos.application.providers.openai_adapter import _usage
 from eiraos.application.providers.http import decode_completion, normalized_base_url, post_with_retry, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
@@ -68,6 +71,29 @@ class AnthropicProviderAdapter:
         except httpx.HTTPError as exc:
             raise upstream_failure("Anthropic", exc) from exc
 
+    async def complete_with_usage(self, *args, **kwargs) -> ProviderCompletion:
+        messages = kwargs.get("messages", args[0] if args else None)
+        model = kwargs.get("model", args[1] if len(args) > 1 else None)
+        payload = {"model": model, "messages": messages,
+                   "max_tokens": kwargs.get("max_tokens", 1000),
+                   "temperature": kwargs.get("temperature", 0.7)}
+        if kwargs.get("system_prompt"):
+            payload["system"] = kwargs["system_prompt"]
+        try:
+            async with self._client(60.0) as client:
+                response = await post_with_retry(
+                    client, f"{self.base_url}/messages", provider="Anthropic",
+                    headers=self._headers(), json=payload,
+                )
+                data = response.json()
+                return ProviderCompletion(
+                    _unpack_anthropic_message(data),
+                    _usage(data.get("usage") if isinstance(data, dict) else None,
+                           "input_tokens", "output_tokens"),
+                )
+        except httpx.HTTPError as exc:
+            raise upstream_failure("Anthropic", exc) from exc
+
     async def stream(
         self,
         messages: List[Dict[str, Any]],
@@ -109,6 +135,40 @@ class AnthropicProviderAdapter:
                                 yield text
         except httpx.HTTPError as exc:
             raise upstream_failure("Anthropic", exc) from exc
+
+    async def stream_with_usage(self, *args, **kwargs):
+        messages = kwargs.get("messages", args[0] if args else None)
+        payload = {"model": kwargs.get("model", args[1] if len(args) > 1 else None),
+                   "messages": messages, "max_tokens": kwargs.get("max_tokens", 1000),
+                   "temperature": kwargs.get("temperature", 0.7), "stream": True}
+        if kwargs.get("system_prompt"):
+            payload["system"] = kwargs["system_prompt"]
+        input_tokens = output_tokens = None
+        async with self._client(120.0) as client:
+            async with client.stream(
+                "POST", f"{self.base_url}/messages", headers=self._headers(), json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(line[6:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") == "message_start":
+                        value = (event.get("message") or {}).get("usage", {}).get("input_tokens")
+                        input_tokens = value if type(value) is int and value >= 0 else None
+                    if event.get("type") == "message_delta":
+                        value = (event.get("usage") or {}).get("output_tokens")
+                        output_tokens = value if type(value) is int and value >= 0 else None
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        text = delta.get("text") if delta.get("type") == "text_delta" else None
+                        if text:
+                            yield ProviderStreamEvent(text=text)
+        if input_tokens is not None and output_tokens is not None:
+            yield ProviderStreamEvent(usage=ProviderUsage(input_tokens, output_tokens))
 
     def models(self) -> tuple[str, ...]:
         return self.MODEL_CATALOG
