@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 import uuid
 
@@ -30,8 +31,9 @@ class DurableMemoryStore:
     ) -> MemoryRecord:
         self._validate(memory_class, scope_kind, content, provenance, reason)
         self._assert_mutation_scope(scope_kind, actor_role)
+        source_message = None
         if source_message_id is not None:
-            await self._assert_message_source(
+            source_message = await self._load_message_source(
                 source_message_id, organization_id, actor_user_id, scope_kind,
             )
         source = None
@@ -39,6 +41,33 @@ class DurableMemoryStore:
             source = await self.get(source_memory_item_id, organization_id, actor_user_id)
             if source is None:
                 raise MemoryBoundaryError("source memory is unavailable in caller scope")
+        authoritative_provenance = {
+            "actor_user_id": actor_user_id,
+            "content_sha256": _sha256(content.strip()),
+            "source_type": "declared",
+            "source_message_id": None,
+            "source_memory_item_id": None,
+            "source_class": None,
+            "source_sha256": None,
+            **({
+                "source_type": "memory",
+                "source_memory_item_id": source.item_id,
+                "source_class": source.memory_class,
+                "source_sha256": _sha256(source.content),
+            } if source else {}),
+            **({
+                "source_type": "message",
+                "source_message_id": source_message.id,
+                "source_sha256": _sha256(source_message.content),
+            } if source_message else {}),
+        }
+        try:
+            provenance_json = json.dumps(
+                {**provenance, **authoritative_provenance},
+                sort_keys=True, separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemoryBoundaryError("provenance must be JSON-compatible") from exc
         record = MemoryRecord(
             item_id=uuid.uuid4().hex,
             organization_id=organization_id,
@@ -47,11 +76,7 @@ class DurableMemoryStore:
             memory_class=memory_class.value,
             scope_kind=scope_kind,
             content=content.strip(),
-            provenance_json=json.dumps({
-                **provenance,
-                **({"source_memory_item_id": source.item_id} if source else {}),
-                **({"source_message_id": source_message_id} if source_message_id else {}),
-            }, sort_keys=True, separators=(",", ":")),
+            provenance_json=provenance_json,
             source_message_id=source_message_id,
             source_memory_item_id=source.item_id if source else None,
             reason=reason.strip(),
@@ -92,10 +117,10 @@ class DurableMemoryStore:
         await self._db.commit()
         return True
 
-    async def _assert_message_source(
+    async def _load_message_source(
         self, message_id: int, organization_id: int, user_id: int, scope_kind: str,
-    ) -> None:
-        stmt = select(Message.id).join(
+    ) -> Message:
+        stmt = select(Message).join(
             Conversation,
             (Conversation.id == Message.conversation_id)
             & (Conversation.organization_id == Message.organization_id),
@@ -106,8 +131,10 @@ class DurableMemoryStore:
         )
         if scope_kind == "user":
             stmt = stmt.where(Conversation.user_id == user_id)
-        if (await self._db.execute(stmt)).scalar_one_or_none() is None:
+        message = (await self._db.execute(stmt)).scalar_one_or_none()
+        if message is None:
             raise MemoryBoundaryError("source message is unavailable in target scope")
+        return message
 
     @staticmethod
     def _assert_mutation_scope(scope_kind: str, actor_role: str) -> None:
@@ -126,3 +153,7 @@ class DurableMemoryStore:
             raise MemoryBoundaryError("durable memory requires provenance")
         if not isinstance(reason, str) or not reason.strip():
             raise MemoryBoundaryError("memory operation requires a reason")
+
+
+def _sha256(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
