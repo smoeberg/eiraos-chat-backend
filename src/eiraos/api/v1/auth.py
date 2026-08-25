@@ -16,6 +16,7 @@ from eiraos.core import ratelimit
 from eiraos.core.ratelimit import limiter
 from eiraos.domains.identity.models import User
 from eiraos.domains.organizations.models import Organization, OrganizationMember
+from eiraos.domains.governance.capabilities import ROLE_CAPABILITIES, Capability
 
 router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 
@@ -25,32 +26,15 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login
 TOKEN_ISSUER = "eiraos"
 TOKEN_AUDIENCE = "eiraos-api"
 
+# Compatibility view for callers that still inspect the legacy mapping. The
+# authority source itself now lives in the governance domain.
 ROLE_PERMISSIONS = {
-    "owner": [
-        "organization:read", "organization:update", "member:invite", "member:remove", "member:manage",
-        "bot:read", "bot:create", "bot:update", "bot:delete",
-        "document:read", "document:upload", "document:delete",
-        "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read", "secret:manage"
-    ],
-    "admin": [
-        "organization:read", "member:invite", "member:remove",
-        "bot:read", "bot:create", "bot:update", "bot:delete",
-        "document:read", "document:upload", "document:delete",
-        "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read"
-    ],
-    "member": [
-        "bot:read",
-        "document:read", "document:upload",
-        "conversation:read", "conversation:create", "conversation:delete",
-        "usage:read"
-    ],
-    "viewer": [
-        "bot:read",
-        "document:read",
-        "conversation:read"
-    ]
+    role: tuple(
+        capability.value
+        for capability in sorted(grants, key=lambda item: item.value)
+        if not capability.value.startswith(("provider:", "tool:"))
+    )
+    for role, grants in ROLE_CAPABILITIES.items()
 }
 
 class TokenResponse(BaseModel):
@@ -250,8 +234,12 @@ def require_permission(required_permission: str):
         role = membership.role or "member"
         current_user["role"] = role
 
-        permissions = ROLE_PERMISSIONS.get(role, [])
-        if required_permission not in permissions:
+        try:
+            required_capability = Capability(required_permission)
+        except ValueError:
+            required_capability = None
+        permissions = ROLE_CAPABILITIES.get(role, frozenset())
+        if required_capability is None or required_capability not in permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied: missing required permission '{required_permission}'"
