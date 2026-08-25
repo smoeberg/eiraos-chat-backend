@@ -68,6 +68,7 @@ from eiraos.application.context_construction import (
     ContextBudgetExceeded,
     ContextPolicy,
     ConversationContextBuilder,
+    DeterministicContextCompactor,
 )
 from eiraos.application.providers.capability_discovery import model_metadata
 
@@ -407,7 +408,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     Message.execution_id.is_(None),
                     Message.execution_id != persisted_execution.execution_id,
                 ),
-            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(40)
+            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(200)
         )).scalars().all())
         metadata = model_metadata(authorized.bot.provider, authorized.bot.model)
         context = ConversationContextBuilder(ContextPolicy(
@@ -415,8 +416,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             reserved_output_tokens=1000,
             max_history_tokens=DEFAULT_HISTORY_TOKEN_BUDGET,
             max_history_messages=40,
+            max_source_messages=200,
+            max_compaction_tokens=1000,
             chars_per_token=_CHARS_PER_TOKEN,
-        )).build(
+        ), compactor=DeterministicContextCompactor()).build(
             history_newest_first=history,
             current_prompt=payload.prompt,
             system_prompt=system_prompt,
