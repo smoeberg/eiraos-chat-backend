@@ -113,6 +113,6 @@ async def test_replay_cannot_change_bot_owner_tenant_and_releases_lock():
 
 def test_f3_03_remains_in_single_migration_chain():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["012_agent_audit"]
+    assert script.get_heads() == ["013_document_chunk_tenant_fk"]
     revision = script.get_revision("007_tenant_isolation")
     assert revision is not None and revision.down_revision == "006_failure_recovery"
