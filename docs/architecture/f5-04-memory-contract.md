@@ -1,6 +1,6 @@
 # F5-04 — Memory Contract
 
-Status: Contract
+Status: Implemented
 Phase: F5-04
 
 ## Purpose
@@ -53,3 +53,20 @@ Every persistent memory or user/org knowledge item MUST retain enough source met
 5. Reads enforce scope/ownership.
 6. Lifecycle/retention is class-aware.
 7. Persistent and knowledge entries preserve provenance metadata.
+
+## Runtime implementation
+
+Durable memory is stored in `memory_records`; conversation history remains in
+the message ledger and short-term context remains ephemeral. The runtime:
+
+- exposes capability-gated create/list/delete operations under `/memory`;
+- distinguishes user and organization scope structurally;
+- requires actor, reason and JSON provenance for every durable write;
+- can bind an explicit promotion to a completed, tenant-visible message or an
+  existing visible memory item;
+- grants organization-memory mutation only to owner/admin roles;
+- filters every read by organization plus caller-visible scope;
+- uses soft deletion and never returns deleted entries; and
+- rejects persistence of conversation-history and short-term-context classes.
+
+Migration head: `011_memory_runtime`.
