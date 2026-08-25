@@ -27,6 +27,9 @@ class Capability(StrEnum):
     CONVERSATION_READ = "conversation:read"
     CONVERSATION_CREATE = "conversation:create"
     CONVERSATION_DELETE = "conversation:delete"
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+    MEMORY_DELETE = "memory:delete"
     USAGE_READ = "usage:read"
     SECRET_MANAGE = "secret:manage"
     PROVIDER_EXECUTE = "provider:execute"
@@ -83,6 +86,9 @@ _MEMBER = frozenset({
     Capability.CONVERSATION_READ,
     Capability.CONVERSATION_CREATE,
     Capability.CONVERSATION_DELETE,
+    Capability.MEMORY_READ,
+    Capability.MEMORY_WRITE,
+    Capability.MEMORY_DELETE,
     Capability.USAGE_READ,
     Capability.PROVIDER_EXECUTE,
     Capability.TOOL_EXECUTE_STANDARD,
@@ -91,6 +97,7 @@ _VIEWER = frozenset({
     Capability.BOT_READ,
     Capability.DOCUMENT_READ,
     Capability.CONVERSATION_READ,
+    Capability.MEMORY_READ,
 })
 
 ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = MappingProxyType({

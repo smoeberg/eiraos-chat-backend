@@ -29,6 +29,15 @@ def test_promotion_is_explicit_and_records_source():
     assert promoted.memory_class is MemoryClass.PERSISTENT_MEMORY
     assert promoted.provenance["source_item_id"] == "c1"
     assert promoted.provenance["source_class"] == "conversation_history"
+    assert store.get("m1", "user:1") == promoted
+
+
+def test_memory_identity_cannot_be_overwritten():
+    store = MemoryStore()
+    item = MemoryItem("m1", MemoryClass.PERSISTENT_MEMORY, "user:1", "x", {"source": "user"})
+    store.put(item)
+    with pytest.raises(ValueError, match="immutable"):
+        store.put(item)
 
 
 def test_promotion_requires_actor_and_reason():

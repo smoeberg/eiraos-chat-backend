@@ -37,6 +37,8 @@ class MemoryStore:
             raise ValueError("memory item requires id and scope")
         if item.memory_class in (MemoryClass.PERSISTENT_MEMORY, MemoryClass.USER_ORG_KNOWLEDGE) and not item.provenance:
             raise ValueError("persistent/knowledge items require provenance")
+        if item.item_id in self._items:
+            raise ValueError("memory item identity is immutable")
         self._items[item.item_id] = item
 
     def get(self, item_id: str, scope: str) -> MemoryItem | None:
@@ -53,10 +55,12 @@ class MemoryStore:
             raise ValueError("promotion requires actor and reason")
         if source.memory_class == MemoryClass.USER_ORG_KNOWLEDGE and promotion.target_class == MemoryClass.PERSISTENT_MEMORY:
             raise ValueError("cross-owner promotion requires explicit boundary")
-        return MemoryItem(
+        promoted = MemoryItem(
             new_id,
             promotion.target_class,
             source.scope,
             content,
             {**promotion.provenance, "source_item_id": source.item_id, "source_class": source.memory_class.value},
         )
+        self.put(promoted)
+        return promoted

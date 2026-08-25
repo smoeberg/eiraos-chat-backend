@@ -11,6 +11,7 @@ ALL_PERMISSIONS = {
     "document:read", "document:upload", "document:delete",
     "conversation:read", "conversation:create", "conversation:delete",
     "usage:read", "secret:manage",
+    "memory:read", "memory:write", "memory:delete",
 }
 
 
