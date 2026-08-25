@@ -17,6 +17,17 @@ def test_release_image_contains_migration_runtime():
     assert "USER 10001" in dockerfile
 
 
+def test_release_image_installs_package_from_source_before_runtime_stage():
+    dockerfile = read("Dockerfile")
+    builder, runtime = dockerfile.split("FROM python:3.11-slim", maxsplit=2)[1:]
+
+    assert "COPY pyproject.toml README.md ./" in builder
+    assert "COPY src/ ./src/" in builder
+    assert builder.index("COPY src/ ./src/") < builder.index("RUN pip install")
+    assert "COPY src/ ./src/" not in runtime
+    assert "PYTHONPATH" not in runtime
+
+
 def test_compose_uses_validated_production_settings_for_api_and_worker():
     compose = read("docker-compose.yml")
     assert compose.count("APP_ENV: production") == 2

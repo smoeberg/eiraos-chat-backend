@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
 RUN pip install --no-cache-dir --prefix=/install .
 
 FROM python:3.11-slim
@@ -17,12 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /install /usr/local
-COPY src/ ./src/
 COPY alembic.ini ./alembic.ini
 COPY alembic/ ./alembic/
 
-ENV PYTHONPATH=/app/src \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 USER 10001
