@@ -1,5 +1,6 @@
 import json
 import asyncio
+from dataclasses import dataclass
 from typing import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,7 @@ from eiraos.core.config import settings
 from eiraos.core.usage_budget import BudgetExceeded, BudgetUnavailable, UsageBudgetGate
 from eiraos.application.usage_execution import ProviderExecutionBudget
 from eiraos.domains.usage.cost_estimator import CostEstimator
+from eiraos.application.chat_execution import ChatExecutionBoundary, IdempotencyReservation
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -58,6 +60,20 @@ class ChatCompletionRequest(BaseModel):
     idempotency_key: str | None = None
     verify: bool = False
     knowledge_scope: str | None = Field(default=None, max_length=MAX_KNOWLEDGE_SCOPE_CHARS)
+
+
+@dataclass(frozen=True)
+class _AuthorizedChat:
+    conversation: Conversation
+    bot: Bot
+    knowledge_scope: str | None
+
+
+@dataclass(frozen=True)
+class _ProviderContext:
+    provider: object
+    messages: list[dict]
+    system_prompt: str | None
 
 
 def _sanitize() -> str:
@@ -228,58 +244,93 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                                  current_user: dict = Depends(get_current_user),
                                  org_id: int = Depends(get_current_active_organization),
                                  db: AsyncSession = Depends(get_db)):
-    conversation = (await db.execute(select(Conversation).where(
-        Conversation.id == payload.conversation_id,
-        Conversation.organization_id == org_id,
-        Conversation.user_id == current_user["user_id"],
-    ))).scalars().first()
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found or access denied")
+    reserved_idem = IdempotencyReservation(None, None)
 
-    bot = (await db.execute(select(Bot).where(Bot.id == payload.bot_id))).scalars().first()
-    if not bot or not _bot_accessible(bot, org_id):
-        raise HTTPException(status_code=404, detail="Bot not found or access denied")
+    async def authorize() -> _AuthorizedChat:
+        conversation = (await db.execute(select(Conversation).where(
+            Conversation.id == payload.conversation_id,
+            Conversation.organization_id == org_id,
+            Conversation.user_id == current_user["user_id"],
+        ))).scalars().first()
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied")
+        bot = (await db.execute(select(Bot).where(Bot.id == payload.bot_id))).scalars().first()
+        if not bot or not _bot_accessible(bot, org_id):
+            raise HTTPException(status_code=404, detail="Bot not found or access denied")
+        return _AuthorizedChat(conversation, bot, _valid_knowledge_scope(payload.knowledge_scope))
 
-    knowledge_scope = _valid_knowledge_scope(payload.knowledge_scope)
-    # F2-03: reserve deterministically before any provider initialization/call.
-    try:
+    async def reserve_idempotency() -> IdempotencyReservation:
+        nonlocal reserved_idem
+        key = idempotency.resolve_idempotency_key(request, payload.idempotency_key)
+        if not key:
+            return reserved_idem
+        outcome = await idempotency.begin_idempotency(db, request, key)
+        if outcome.status == "completed":
+            cached = await idempotency.read_cached_response(db, request, key)
+            if cached is not None:
+                reserved_idem = IdempotencyReservation(key, None, json.loads(cached))
+                return reserved_idem
+        reserved_idem = IdempotencyReservation(key, outcome.lease_token)
+        return reserved_idem
+
+    def reserve_budget(_authorized: _AuthorizedChat) -> None:
         _execution_budget().reserve(
-            user_id=current_user["user_id"],
-            organization_id=org_id,
-            prompt=payload.prompt,
-            verify=payload.verify,
+            user_id=current_user["user_id"], organization_id=org_id,
+            prompt=payload.prompt, verify=payload.verify,
         )
+
+    async def prepare_provider(authorized: _AuthorizedChat) -> _ProviderContext:
+        provider = await _provider_for_bot(authorized.bot, org_id)
+        knowledge_context = await _knowledge_context(
+            db, org_id, payload.prompt, authorized.knowledge_scope,
+        )
+        system_prompt = _combined_system_prompt(authorized.bot.system_prompt, knowledge_context)
+        messages = await _build_messages(
+            db, authorized.conversation.id, payload.prompt, system_prompt,
+        )
+        return _ProviderContext(provider, messages, system_prompt)
+
+    async def persist_request(authorized: _AuthorizedChat) -> None:
+        db.add(Message(
+            conversation_id=authorized.conversation.id, role="user", content=payload.prompt,
+            bot_id=authorized.bot.id, status="completed", ai_marked=False,
+        ))
+        await db.commit()
+
+    boundary = ChatExecutionBoundary(
+        authorize=authorize,
+        reserve_idempotency=reserve_idempotency,
+        reserve_budget=reserve_budget,
+        prepare_provider=prepare_provider,
+        persist_request=persist_request,
+    )
+    prepared = None
+    try:
+        prepared = await boundary.prepare()
     except BudgetExceeded as exc:
+        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 429)
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Execution budget exceeded.") from exc
     except BudgetUnavailable as exc:
+        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 503)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution budget unavailable.") from exc
-    idem_key = idempotency.resolve_idempotency_key(request, getattr(payload, "idempotency_key", None))
-    lease_token: str | None = None
-    if idem_key:
-        outcome = await idempotency.begin_idempotency(db, request, idem_key)
-        if outcome.status == "completed":
-            cached = await idempotency.read_cached_response(db, request, idem_key)
-            if cached is not None:
-                return json.loads(cached)
-        lease_token = outcome.lease_token
-
-    db.add(Message(conversation_id=conversation.id, role="user", content=payload.prompt, bot_id=bot.id,
-                   status="completed", ai_marked=False))
-    await db.commit()
-
-    try:
-        provider = await _provider_for_bot(bot, org_id)
-        knowledge_context = await _knowledge_context(db, org_id, payload.prompt, knowledge_scope)
-        effective_system_prompt = _combined_system_prompt(bot.system_prompt, knowledge_context)
-        provider_messages = await _build_messages(db, conversation.id, payload.prompt, effective_system_prompt)
     except HTTPException as exc:
-        if idem_key and lease_token:
-            await _release_preflight_lease(db, request, idem_key, lease_token, exc.status_code)
+        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, exc.status_code)
         raise
     except Exception as exc:
-        if idem_key and lease_token:
-            await _release_preflight_lease(db, request, idem_key, lease_token, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        await _release_preflight_lease(db, request, reserved_idem.key, reserved_idem.lease_token, 500)
         raise HTTPException(status_code=500, detail="AI provider could not be initialized.") from exc
+
+    if prepared.is_replay:
+        return prepared.cached_response
+    authorized = prepared.authorized
+    provider_context = prepared.provider_context
+    assert authorized is not None and provider_context is not None
+    conversation, bot = authorized.conversation, authorized.bot
+    provider = provider_context.provider
+    provider_messages = provider_context.messages
+    effective_system_prompt = provider_context.system_prompt
+    idem_key = prepared.idempotency.key
+    lease_token = prepared.idempotency.lease_token
 
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
