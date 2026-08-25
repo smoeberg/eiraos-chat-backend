@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.core.config import settings
 from eiraos.core.database import get_db
-from eiraos.domains.documents.file_service import extract_text, safe_extension, validate_upload, write_upload
+from eiraos.domains.documents.file_service import extract_file_text, safe_extension, validate_upload, write_upload
 from eiraos.domains.documents.models import Document
 from eiraos.workers.client import enqueue_document_ingestion
 
@@ -60,9 +61,9 @@ async def upload_document(
     relative = target.relative_to(Path(settings.STORAGE_ROOT).resolve()).as_posix()
 
     try:
-        size = write_upload(file.file, target)
+        size = await asyncio.to_thread(write_upload, file.file, target)
         validate_upload(filename, size)
-        text_content = extract_text(target.read_bytes(), extension)
+        text_content = await asyncio.to_thread(extract_file_text, target, extension)
     except ValueError as exc:
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
