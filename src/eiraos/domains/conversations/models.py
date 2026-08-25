@@ -101,6 +101,7 @@ class ChatExecution(Base):
     failure_retryable = Column(Boolean, nullable=False, default=False)
     partial_response = Column(Boolean, nullable=False, default=False)
     recovered_at = Column(DateTime, nullable=True)
+    governance_audit_required = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
                         server_default=text("CURRENT_TIMESTAMP"))

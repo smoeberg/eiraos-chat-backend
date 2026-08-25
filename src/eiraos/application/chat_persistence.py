@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from eiraos.domains.conversations.models import ChatExecution, Message
 from eiraos.domains.idempotency.models import IdempotencyRecord
 from eiraos.domains.usage.models import ProviderUsageRecord
+from eiraos.domains.governance.models import GovernanceDecisionRecord
 from eiraos.application.chat_recovery import FailureCode, failure_policy
 
 
@@ -80,6 +81,7 @@ class ChatPersistenceContract:
         recover: bool = False,
         lease_token: str | None = None,
         max_attempts: int = 3,
+        governance_decision_id: str | None = None,
     ) -> PersistedChatExecution:
         existing = (await self._execute(select(ChatExecution).where(
             ChatExecution.execution_id == execution_id,
@@ -135,6 +137,11 @@ class ChatPersistenceContract:
                 raise PersistenceConflict("execution usage binding is invalid")
             usage.total_tokens += estimated_tokens
             usage.estimated_cost += Decimal(str(estimated_cost))
+            await self._bind_governance_decision(
+                governance_decision_id, existing.execution_id, organization_id, user_id,
+            )
+            if governance_decision_id is not None:
+                existing.governance_audit_required = True
             await self._commit_or_unavailable()
             return self._snapshot(existing)
 
@@ -152,6 +159,7 @@ class ChatPersistenceContract:
             status="prepared",
             attempt_count=1,
             max_attempts=max_attempts,
+            governance_audit_required=governance_decision_id is not None,
         )
         user_message = Message(
             conversation_id=conversation_id, organization_id=organization_id,
@@ -171,6 +179,12 @@ class ChatPersistenceContract:
             execution.user_message_id = user_message.id
             execution.assistant_message_id = assistant_message.id
             await self._db.flush()
+            await self._bind_governance_decision(
+                governance_decision_id, execution_id, organization_id, user_id,
+            )
+        except PersistenceConflict:
+            await self._db.rollback()
+            raise
         except Exception:
             await self._db.rollback()
             raise PersistenceUnavailable("chat execution preparation could not be flushed")
@@ -296,6 +310,24 @@ class ChatPersistenceContract:
             idem.response_status = response_status
             idem.response_reference = response_reference
             idem.lease_until = None
+        decisions = (
+            await self._execute(
+                select(GovernanceDecisionRecord).where(
+                    GovernanceDecisionRecord.execution_id == execution.execution_id,
+                    GovernanceDecisionRecord.organization_id == execution.organization_id,
+                    GovernanceDecisionRecord.allowed.is_(True),
+                    GovernanceDecisionRecord.finalized_at.is_(None),
+                ).with_for_update()
+            )
+        ).scalars().all()
+        if execution.governance_audit_required and not decisions:
+            await self._db.rollback()
+            raise PersistenceConflict("governance audit binding is missing")
+        for decision in decisions:
+            decision.result_status = terminal_status
+            decision.response_status = response_status
+            decision.failure_code = failure_code.value if failure_code is not None else None
+            decision.finalized_at = datetime.utcnow()
         try:
             await self._db.commit()
         except Exception:
@@ -322,6 +354,34 @@ class ChatPersistenceContract:
             await self._db.rollback()
             raise PersistenceConflict("recovery lease ownership was lost")
         return idem
+
+    async def _bind_governance_decision(
+        self,
+        decision_id: str | None,
+        execution_id: str,
+        organization_id: int,
+        user_id: int,
+    ) -> None:
+        if decision_id is None:
+            return
+        decision = (
+            await self._execute(
+                select(GovernanceDecisionRecord)
+                .where(GovernanceDecisionRecord.decision_id == decision_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            decision is None
+            or not decision.allowed
+            or decision.finalized_at is not None
+            or decision.organization_id != organization_id
+            or decision.user_id != user_id
+            or decision.execution_id not in {None, execution_id}
+        ):
+            await self._db.rollback()
+            raise PersistenceConflict("governance decision binding is invalid")
+        decision.execution_id = execution_id
 
     async def _commit_or_unavailable(self) -> None:
         try:
