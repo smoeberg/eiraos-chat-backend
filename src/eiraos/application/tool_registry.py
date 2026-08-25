@@ -34,6 +34,16 @@ def _normalize_capabilities(capabilities: tuple[str, ...] | list[str]) -> tuple[
     return tuple(sorted(normalized))
 
 
+def _freeze(value):
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("schema keys must be strings")
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
     """Immutable descriptive metadata for a registered tool."""
@@ -52,13 +62,15 @@ class Tool:
             raise ValueError("tool version must not be empty")
         if not self.description.strip():
             raise ValueError("tool description must not be empty")
+        if any(not (char.isalnum() or char in "_.-") for char in self.name.strip()):
+            raise ValueError("tool name must be a stable machine identifier")
         if not isinstance(self.capabilities, (tuple, list)):
             raise ValueError("capabilities must be a sequence of strings")
         object.__setattr__(self, "name", self.name.strip())
         object.__setattr__(self, "version", self.version.strip())
         object.__setattr__(self, "description", self.description.strip())
-        object.__setattr__(self, "input_schema", MappingProxyType(dict(self.input_schema)))
-        object.__setattr__(self, "output_schema", MappingProxyType(dict(self.output_schema)))
+        object.__setattr__(self, "input_schema", _freeze(self.input_schema))
+        object.__setattr__(self, "output_schema", _freeze(self.output_schema))
         object.__setattr__(self, "capabilities", _normalize_capabilities(self.capabilities))
 
 

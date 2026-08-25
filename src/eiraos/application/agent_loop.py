@@ -17,7 +17,12 @@ from eiraos.application.agent_audit import AgentEventType
 class LoopStep:
     tool: str
     capability: str
-    arguments: dict
+    arguments: Mapping
+
+    def __post_init__(self):
+        if not isinstance(self.arguments, Mapping):
+            raise ValueError("tool arguments must be a mapping")
+        object.__setattr__(self, "arguments", _freeze_value(self.arguments))
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,3 +256,13 @@ def _reason_code(value) -> str:
     if rendered and len(rendered) <= 64 and all(char.isupper() or char.isdigit() or char == "_" for char in rendered):
         return rendered
     return "UNSAFE_REASON_CODE"
+
+
+def _freeze_value(value):
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("tool argument keys must be strings")
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    return value
