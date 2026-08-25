@@ -12,6 +12,10 @@ class IdempotencyRecord(Base):
             "organization_id", "user_id", "key",
             name="uq_idempotency_org_user_key",
         ),
+        UniqueConstraint(
+            "id", "organization_id", "user_id",
+            name="uq_idempotency_id_org_user",
+        ),
         Index("ix_idempotency_expires_at", "expires_at"),
     )
 

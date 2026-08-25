@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from eiraos.core.database import Base
@@ -15,6 +15,9 @@ class Organization(Base):
 
 class OrganizationMember(Base):
     __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint("user_id", "organization_id", name="uq_org_members_user_org"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)

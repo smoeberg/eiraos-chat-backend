@@ -56,6 +56,7 @@ async def _owned_execution(session, *, execution_id="execution", max_attempts=3)
         organization_id=1,
         user_id=2,
         bot_id=4,
+        bot_organization_id=1,
         provider="openai",
         model="model",
         prompt="hello",
@@ -169,6 +170,7 @@ async def test_failed_execution_retry_requires_new_owned_lease_and_reuses_rows(s
         organization_id=1,
         user_id=2,
         bot_id=4,
+        bot_organization_id=1,
         provider="openai",
         model="model",
         prompt="hello",
@@ -207,6 +209,7 @@ async def test_process_crash_recovery_is_lease_owned_and_bounded(session):
             organization_id=1,
             user_id=2,
             bot_id=4,
+            bot_organization_id=1,
             provider="openai",
             model="model",
             prompt="hello",
@@ -225,6 +228,7 @@ async def test_process_crash_recovery_is_lease_owned_and_bounded(session):
         organization_id=1,
         user_id=2,
         bot_id=4,
+        bot_organization_id=1,
         provider="openai",
         model="model",
         prompt="hello",
@@ -259,6 +263,6 @@ async def test_process_crash_recovery_is_lease_owned_and_bounded(session):
     assert idem is not None and idem.status == "failed"
 
 
-def test_f2_07_is_the_only_alembic_head():
+def test_migrations_remain_single_head_after_f2_07():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["006_failure_recovery"]
+    assert script.get_heads() == ["007_tenant_isolation"]

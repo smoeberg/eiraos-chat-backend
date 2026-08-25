@@ -56,7 +56,8 @@ async def test_prepare_atomically_binds_execution_messages_usage_and_idempotency
     contract = ChatPersistenceContract(session)
     persisted = await contract.prepare_exchange(
         execution_id="execution-1", request_id="request-1", conversation_id=3,
-        organization_id=1, user_id=2, bot_id=4, provider="openai", model="model",
+        organization_id=1, user_id=2, bot_id=4, bot_organization_id=1,
+        provider="openai", model="model",
         prompt="hello", idempotency_record_id=idem.id, estimated_tokens=42,
         estimated_cost=42.0, verification=False,
     )
@@ -66,8 +67,10 @@ async def test_prepare_atomically_binds_execution_messages_usage_and_idempotency
     usage = (await session.execute(select(ProviderUsageRecord))).scalar_one()
     assert persisted.execution_id == execution.execution_id == usage.execution_id
     assert usage.chat_execution_id == execution.id
+    assert execution.bot_organization_id == 1
     assert [message.role for message in messages] == ["user", "assistant"]
     assert {message.execution_id for message in messages} == {execution.execution_id}
+    assert {message.organization_id for message in messages} == {execution.organization_id}
     assert execution.user_message_id == messages[0].id
     assert execution.assistant_message_id == messages[1].id
     assert usage.total_tokens == 42
@@ -85,7 +88,8 @@ async def test_finalize_updates_assistant_execution_and_idempotency_in_one_contr
     contract = ChatPersistenceContract(session)
     persisted = await contract.prepare_exchange(
         execution_id="execution-2", request_id="request-2", conversation_id=3,
-        organization_id=1, user_id=2, bot_id=4, provider="openai", model="model",
+        organization_id=1, user_id=2, bot_id=4, bot_organization_id=1,
+        provider="openai", model="model",
         prompt="hello", idempotency_record_id=idem.id, estimated_tokens=10,
         estimated_cost=10.0, verification=False,
     )
@@ -125,7 +129,8 @@ async def test_wrong_lease_fails_closed_before_any_terminal_mutation(session):
     contract = ChatPersistenceContract(session)
     persisted = await contract.prepare_exchange(
         execution_id="execution-3", request_id="request-3", conversation_id=3,
-        organization_id=1, user_id=2, bot_id=4, provider="openai", model="model",
+        organization_id=1, user_id=2, bot_id=4, bot_organization_id=1,
+        provider="openai", model="model",
         prompt="hello", idempotency_record_id=idem.id, estimated_tokens=10,
         estimated_cost=10.0, verification=False,
     )
@@ -144,7 +149,8 @@ async def test_wrong_lease_fails_closed_before_any_terminal_mutation(session):
 
 def test_alembic_has_one_connected_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["006_failure_recovery"]
+    assert script.get_heads() == ["007_tenant_isolation"]
     revisions = {revision.revision for revision in script.walk_revisions()}
     assert {"000_base_schema", "0019", "002_idempotency_lease", "003_idempotency_lease_token",
-            "004_provider_usage", "005_chat_persistence", "006_failure_recovery"} <= revisions
+            "004_provider_usage", "005_chat_persistence", "006_failure_recovery",
+            "007_tenant_isolation"} <= revisions
