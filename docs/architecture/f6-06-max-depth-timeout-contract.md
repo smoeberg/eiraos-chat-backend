@@ -1,6 +1,6 @@
 # F6-06 — Maximum Execution Depth / Timeout Contract
 
-Status: Contract
+Status: Implemented
 Phase: F6-06
 
 ## Purpose
@@ -52,3 +52,11 @@ F6-06 controls hard run bounds only. It does not define:
 5. Running execution has an enforceable timeout boundary.
 6. Invalid configuration fails closed.
 7. Termination is terminal and audit-safe.
+
+## Runtime boundary
+
+`run_agent_loop_async` is the F6-06 execution boundary. It requires immutable
+`AgentRunLimits`, rejects non-cancellable synchronous executors, applies the
+overall deadline to planning and authorization, and wraps every tool coroutine
+in an enforceable `asyncio.wait_for` boundary. Terminal outcomes expose only
+depth/limit/deadline offsets and stable reason codes.
