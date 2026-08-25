@@ -32,13 +32,18 @@ class VerificationResult(str):
     reason: str
     answer: str
     verified: bool
+    provider_output: str | None
 
-    def __new__(cls, status: str, reason: str, answer: str, verified: bool):
+    def __new__(
+        cls, status: str, reason: str, answer: str, verified: bool,
+        provider_output: str | None = None,
+    ):
         instance = super().__new__(cls, answer)
         instance.status = status
         instance.reason = reason
         instance.answer = answer
         instance.verified = verified
+        instance.provider_output = provider_output
         return instance
 
 
@@ -63,11 +68,7 @@ async def verify_answer(
     model: str,
 ) -> VerificationResult:
     """Verify a primary answer; only explicit PASS is marked verified."""
-    verification_messages = [
-        {"role": "user", "content": f"BRUGERENS SPØRGSMÅL:\n{original_prompt}"},
-        {"role": "assistant", "content": f"FORESLÅET SVAR, DER SKAL VERIFICERES:\n{primary_answer}"},
-        {"role": "user", "content": "Verificér nu det foreslåede svar. Returnér kun din kvalitetskontrol som JSON."},
-    ]
+    verification_messages = build_verification_messages(original_prompt, primary_answer)
     raw = await verifier.complete(
         model=model,
         messages=verification_messages,
@@ -75,8 +76,16 @@ async def verify_answer(
     )
     status, reason = _parse_verification(str(raw))
     if status == "PASS":
-        return VerificationResult(status, reason, primary_answer + VERIFIED_BADGE, True)
-    return VerificationResult(status, reason, primary_answer + VERIFICATION_FAILED_BADGE, False)
+        return VerificationResult(status, reason, primary_answer + VERIFIED_BADGE, True, str(raw))
+    return VerificationResult(status, reason, primary_answer + VERIFICATION_FAILED_BADGE, False, str(raw))
+
+
+def build_verification_messages(original_prompt: str, primary_answer: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": f"BRUGERENS SPØRGSMÅL:\n{original_prompt}"},
+        {"role": "assistant", "content": f"FORESLÅET SVAR, DER SKAL VERIFICERES:\n{primary_answer}"},
+        {"role": "user", "content": "Verificér nu det foreslåede svar. Returnér kun din kvalitetskontrol som JSON."},
+    ]
 
 
 def build_knowledge_system_context(results: Sequence[dict[str, Any]]) -> str | None:

@@ -17,6 +17,10 @@ class ProviderUsageRecord(Base):
             ["chat_executions.id", "chat_executions.organization_id"],
             name="fk_provider_usage_tenant_execution",
         ),
+        UniqueConstraint(
+            "chat_execution_id", "attempt", "operation", "usage_source",
+            name="uq_provider_usage_execution_attempt_operation_source",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -29,6 +33,10 @@ class ProviderUsageRecord(Base):
     organization_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False, default="reservation")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    usage_source: Mapped[str] = mapped_column(String(32), nullable=False, default="reservation")
+    pricing_revision: Mapped[str | None] = mapped_column(String(32), nullable=True)
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

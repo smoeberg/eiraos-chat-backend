@@ -15,6 +15,7 @@ from eiraos.domains.idempotency.models import IdempotencyRecord
 from eiraos.domains.usage.models import ProviderUsageRecord
 from eiraos.domains.governance.models import GovernanceDecisionRecord
 from eiraos.application.chat_recovery import FailureCode, failure_policy
+from eiraos.application.cost_accounting import ExecutionCost
 
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -131,6 +132,7 @@ class ChatPersistenceContract:
             existing.partial_response = False
             usage = (await self._execute(select(ProviderUsageRecord).where(
                 ProviderUsageRecord.chat_execution_id == existing.id,
+                ProviderUsageRecord.usage_source == "reservation",
             ).with_for_update())).scalar_one_or_none()
             if usage is None:
                 await self._db.rollback()
@@ -196,6 +198,9 @@ class ChatPersistenceContract:
             organization_id=organization_id,
             provider=provider,
             model=model,
+            operation="reservation",
+            attempt=1,
+            usage_source="reservation",
             total_tokens=estimated_tokens,
             estimated_cost=Decimal(str(estimated_cost)),
             verification=verification,
@@ -268,6 +273,7 @@ class ChatPersistenceContract:
         response_reference: str,
         lease_token: str | None,
         failure_code: FailureCode | None = None,
+        accounting: tuple[ExecutionCost, ...] = (),
     ) -> bool:
         if terminal_status not in TERMINAL_STATUSES:
             raise ValueError("terminal_status must be completed, failed or cancelled")
@@ -328,12 +334,58 @@ class ChatPersistenceContract:
             decision.response_status = response_status
             decision.failure_code = failure_code.value if failure_code is not None else None
             decision.finalized_at = datetime.utcnow()
+        await self._record_accounting(execution, accounting)
         try:
             await self._db.commit()
         except Exception:
             await self._db.rollback()
             raise PersistenceUnavailable("chat execution finalization could not be committed")
         return True
+
+    async def _record_accounting(
+        self,
+        execution: ChatExecution,
+        entries: tuple[ExecutionCost, ...],
+    ) -> None:
+        operations: set[str] = set()
+        for entry in entries:
+            if entry.operation in operations:
+                await self._db.rollback()
+                raise PersistenceConflict("duplicate accounting operation")
+            operations.add(entry.operation)
+            if entry.operation == "primary" and (
+                entry.provider != execution.provider or entry.model != execution.model
+            ):
+                await self._db.rollback()
+                raise PersistenceConflict("primary accounting binding is invalid")
+            existing = (await self._execute(select(ProviderUsageRecord).where(
+                ProviderUsageRecord.chat_execution_id == execution.id,
+                ProviderUsageRecord.attempt == execution.attempt_count,
+                ProviderUsageRecord.operation == entry.operation,
+                ProviderUsageRecord.usage_source == entry.usage_source,
+            ).with_for_update())).scalar_one_or_none()
+            if existing is not None:
+                await self._db.rollback()
+                raise PersistenceConflict("execution accounting was already recorded")
+            self._db.add(ProviderUsageRecord(
+                request_id=execution.request_id,
+                execution_id=execution.execution_id,
+                chat_execution_id=execution.id,
+                user_id=execution.user_id,
+                organization_id=execution.organization_id,
+                provider=entry.provider,
+                model=entry.model,
+                operation=entry.operation,
+                attempt=execution.attempt_count,
+                usage_source=entry.usage_source,
+                pricing_revision=entry.pricing_revision,
+                input_tokens=entry.input_tokens,
+                output_tokens=entry.output_tokens,
+                total_tokens=entry.total_tokens,
+                estimated_cost=Decimal("0"),
+                actual_cost=entry.cost,
+                verification=entry.operation == "verification",
+            ))
 
     async def _assert_recovery_owner(
         self, execution: ChatExecution, lease_token: str | None,

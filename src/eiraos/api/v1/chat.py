@@ -16,7 +16,14 @@ from eiraos.domains.agents.models import Bot
 from eiraos.domains.documents.rag_service import RAGService
 from eiraos.api.v1.documents import generate_embedding
 from eiraos.application.providers.factory import AIProviderFactory
-from eiraos.application.business_features import verify_answer, build_knowledge_system_context, VerificationResult, VERIFICATION_FAILED_BADGE
+from eiraos.application.business_features import (
+    VERIFICATION_FAILED_BADGE,
+    VERIFICATION_SYSTEM_PROMPT,
+    VerificationResult,
+    build_knowledge_system_context,
+    build_verification_messages,
+    verify_answer,
+)
 from eiraos.core.secrets import SecretService
 from eiraos.core import idempotency
 from eiraos.core.config import settings
@@ -54,6 +61,7 @@ from eiraos.application.governance_audit import (
     GovernanceAuditUnavailable,
     request_fingerprint,
 )
+from eiraos.application.cost_accounting import ExecutionCostAccountant
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -507,9 +515,20 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     lease_token = prepared.idempotency.lease_token
     execution_id = persisted_execution.execution_id
     assistant_message_id = persisted_execution.assistant_message_id
+    accountant = ExecutionCostAccountant()
+    accounting_entries = []
+
+    def account_primary(output: str):
+        return accountant.account(
+            provider=bot.provider, model=bot.model, operation="primary",
+            messages=provider_messages, output=output,
+            system_prompt=effective_system_prompt,
+        )
 
     async def finalize_failure(code: FailureCode, content: str = "") -> bool:
         policy = failure_policy(code)
+        if not any(entry.operation == "primary" for entry in accounting_entries):
+            accounting_entries.append(account_primary(content))
         return await persistence.finalize(
             execution_id=execution_id,
             terminal_status="cancelled" if code is FailureCode.CLIENT_CANCELLED else "failed",
@@ -518,6 +537,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             response_reference="failed",
             lease_token=lease_token,
             failure_code=code,
+            accounting=tuple(accounting_entries),
         )
 
     provider_isolation = ProviderFailureIsolation()
@@ -533,6 +553,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
                 validate=require_text,
             )
+            primary_response = full_response
+            accounting_entries.append(account_primary(primary_response))
             if lease_lost is not None and lease_lost.is_set():
                 raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
             verified = False
@@ -553,6 +575,15 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                         ),
                         settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
                     )
+                    if result.provider_output is not None:
+                        accounting_entries.append(accountant.account(
+                            provider=verifier_bot.provider,
+                            model=verifier_bot.model,
+                            operation="verification",
+                            messages=build_verification_messages(payload.prompt, primary_response),
+                            output=result.provider_output,
+                            system_prompt=VERIFICATION_SYSTEM_PROMPT,
+                        ))
                 except Exception:
                     result = _verification_failure(full_response, "Verifikationskontrollen kunne ikke gennemføres.")
                 full_response = result.answer
@@ -571,6 +602,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 response_status=status.HTTP_200_OK,
                 response_reference=json.dumps(response_payload),
                 lease_token=lease_token,
+                accounting=tuple(accounting_entries),
             ):
                 raise HTTPException(status_code=409, detail="Execution was already finalized.")
             return response_payload
@@ -628,9 +660,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         pump = None
         verification_task = None
         stream_failure_code = FailureCode.PROVIDER_FAILURE
+        primary_content = None
+        verifier_accounting_context = None
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
 
         async def apply_terminal(terminal: StreamTerminal, content: str) -> None:
+            if not any(entry.operation == "primary" for entry in accounting_entries):
+                accounting_entries.append(account_primary(primary_content if primary_content is not None else content))
             if terminal is StreamTerminal.COMPLETED:
                 response_payload = {
                     "role": "assistant", "content": content, "ai_marked": True,
@@ -641,6 +677,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     execution_id=execution_id, terminal_status=terminal.value, content=content,
                     response_status=200, response_reference=json.dumps(response_payload),
                     lease_token=lease_token,
+                    accounting=tuple(accounting_entries),
                 )
                 if not completed:
                     raise RuntimeError("execution was already finalized")
@@ -650,6 +687,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 execution_id=execution_id, terminal_status=terminal.value, content=content,
                 response_status=policy.response_status, response_reference="failed", lease_token=lease_token,
                 failure_code=stream_failure_code,
+                accounting=tuple(accounting_entries),
             )
 
         finalizer = StreamFinalizer(apply_terminal)
@@ -688,14 +726,17 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     raise RuntimeError("provider stream timed out")
             await pump.aclose()
             pump = None
+            primary_content = accumulated
 
             if payload.verify:
                 async def run_verification() -> VerificationResult:
+                    nonlocal verifier_accounting_context
                     try:
                         verifier_bot, verifier_permit = await _find_verifier_bot(
                             db, bot, org_id, current_user["authorization"],
                         )
                         verifier = await _provider_for_bot(verifier_bot, org_id, verifier_permit)
+                        verifier_accounting_context = verifier_bot
                         return await provider_isolation.execute(
                             verify_answer(
                                 primary_answer=accumulated,
@@ -725,6 +766,15 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     yield ": keep-alive\n\n"
                 result = await verification_task
                 verification_task = None
+                if result.provider_output is not None and verifier_accounting_context is not None:
+                    accounting_entries.append(accountant.account(
+                        provider=verifier_accounting_context.provider,
+                        model=verifier_accounting_context.model,
+                        operation="verification",
+                        messages=build_verification_messages(payload.prompt, primary_content),
+                        output=result.provider_output,
+                        system_prompt=VERIFICATION_SYSTEM_PROMPT,
+                    ))
                 accumulated = result.answer
                 verified = result.verified
                 verification_status = result.status

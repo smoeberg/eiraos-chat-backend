@@ -265,4 +265,4 @@ async def test_process_crash_recovery_is_lease_owned_and_bounded(session):
 
 def test_migrations_remain_single_head_after_f2_07():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["008_governance_audit"]
+    assert script.get_heads() == ["009_cost_accounting"]
