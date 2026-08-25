@@ -1,13 +1,12 @@
 """ARQ job queue client — Redis settings from application config."""
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from arq import create_pool
 from arq.connections import RedisSettings, ArqRedis
 import structlog
 
 from eiraos.core.config import settings
+from eiraos.workers.redis_config import redis_settings_from_url
 
 logger = structlog.get_logger()
 
@@ -15,16 +14,7 @@ _pool: ArqRedis | None = None
 
 
 def _redis_settings() -> RedisSettings:
-    url = (settings.REDIS_URL or "").strip()
-    if not url:
-        return RedisSettings(host="localhost", port=6379)
-    parsed = urlparse(url)
-    return RedisSettings(
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 6379,
-        database=int((parsed.path or "/0").lstrip("/") or 0),
-        password=parsed.password,
-    )
+    return redis_settings_from_url(settings.REDIS_URL)
 
 
 async def get_arq_pool() -> ArqRedis | None:
