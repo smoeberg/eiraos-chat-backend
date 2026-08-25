@@ -55,8 +55,14 @@ def test_compose_uses_validated_production_settings_for_api_and_worker():
     compose = read("docker-compose.yml")
     assert compose.count("APP_ENV: production") == 2
     assert compose.count("REDIS_URL: redis://redis:6379/0") == 2
-    assert compose.count("USER_TOKEN_BUDGET_LIMIT:") == 2
-    assert compose.count("ORGANIZATION_TOKEN_BUDGET_LIMIT:") == 2
+    assert sum(
+        line.strip().startswith("USER_TOKEN_BUDGET_LIMIT:")
+        for line in compose.splitlines()
+    ) == 2
+    assert sum(
+        line.strip().startswith("ORGANIZATION_TOKEN_BUDGET_LIMIT:")
+        for line in compose.splitlines()
+    ) == 2
     assert compose.count("RELEASE_SHA: ${RELEASE_SHA:?RELEASE_SHA must be set}") == 2
     assert compose.count('ALLOW_PUBLIC_REGISTER: "false"') == 2
     assert "REDIS_HOST" not in compose and "REDIS_PORT" not in compose
