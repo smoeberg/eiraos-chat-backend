@@ -3,7 +3,7 @@ import json
 import logging
 import httpx
 from eiraos.application.providers.base import ProviderCapabilities
-from eiraos.application.providers.http import decode_completion, normalized_base_url, upstream_failure
+from eiraos.application.providers.http import decode_completion, normalized_base_url, post_with_retry, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.gemini")
@@ -69,7 +69,10 @@ class GeminiProviderAdapter:
 
         try:
             async with self._client(60.0) as client:
-                response = await client.post(url, headers={"x-goog-api-key": self.api_key}, json=payload)
+                response = await post_with_retry(
+                    client, url, provider="Gemini",
+                    headers={"x-goog-api-key": self.api_key}, json=payload,
+                )
                 return decode_completion(response, "Gemini", _unpack_gemini_text)
         except httpx.HTTPError as exc:
             raise upstream_failure("Gemini", exc) from exc
