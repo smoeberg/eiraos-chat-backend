@@ -36,7 +36,9 @@ async def test_heartbeat_does_not_reset_original_chunk_timeout():
 
     pump = StreamPump(
         stalled(), is_disconnected=AsyncMock(return_value=False), lease_lost=None,
-        heartbeat_seconds=0.01, chunk_timeout_seconds=0.035,
+        # Keep a wide scheduler margin: the contract is deadline continuity,
+        # not sub-10ms event-loop precision under a loaded full-suite runner.
+        heartbeat_seconds=0.02, chunk_timeout_seconds=0.2,
     )
     heartbeats = 0
     while True:
@@ -45,7 +47,7 @@ async def test_heartbeat_does_not_reset_original_chunk_timeout():
             break
         assert event.kind is StreamEventKind.HEARTBEAT
         heartbeats += 1
-        assert heartbeats < 10
+        assert heartbeats < 20
     assert heartbeats >= 2
     await pump.aclose()
 
