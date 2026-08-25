@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from eiraos.core.database import get_db
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
@@ -27,8 +28,11 @@ from eiraos.application.chat_persistence import (
     ChatPersistenceContract,
     PersistedChatExecution,
     PersistenceConflict,
+    PersistenceUnavailable,
+    RetryLimitExceeded,
     execution_identity,
 )
+from eiraos.application.chat_recovery import FailureCode, failure_policy, provider_with_timeout
 from eiraos.application.streaming_lifecycle import (
     StreamEventKind,
     StreamFinalizer,
@@ -272,11 +276,24 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 reserved_idem = IdempotencyReservation(
                     key=key, lease_token=None, cached_response=json.loads(cached),
                     record_id=outcome.record_id,
+                    is_recovery=False,
                 )
                 return reserved_idem
         reserved_idem = IdempotencyReservation(
             key=key, lease_token=outcome.lease_token, record_id=outcome.record_id,
+            is_recovery=outcome.is_recovery,
         )
+        if outcome.is_recovery and outcome.record_id is not None:
+            await persistence.assert_recovery_allowed(
+                execution_id=execution_identity(
+                    organization_id=org_id,
+                    user_id=current_user["user_id"],
+                    idempotency_key=key,
+                    idempotency_record_id=outcome.record_id,
+                ),
+                idempotency_record_id=outcome.record_id,
+                lease_token=outcome.lease_token,
+            )
         return reserved_idem
 
     def reserve_budget(_authorized: _AuthorizedChat) -> None:
@@ -305,6 +322,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             execution_id=execution_identity(
                 organization_id=org_id, user_id=current_user["user_id"],
                 idempotency_key=reserved_idem.key,
+                idempotency_record_id=reserved_idem.record_id,
             ),
             request_id=getattr(request.state, "request_id", "unknown"),
             conversation_id=authorized.conversation.id,
@@ -318,6 +336,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             estimated_tokens=budgeted_execution.estimate.total_tokens,
             estimated_cost=budgeted_execution.reservation.total_reserved_cost,
             verification=payload.verify,
+            recover=reserved_idem.is_recovery,
+            lease_token=reserved_idem.lease_token,
+            max_attempts=settings.CHAT_MAX_ATTEMPTS,
         )
 
     boundary = ChatExecutionBoundary(
@@ -328,7 +349,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         persist_request=persist_request,
     )
 
-    async def fail_preflight(status_code: int) -> None:
+    async def fail_preflight(
+        status_code: int, failure_code: FailureCode = FailureCode.PROVIDER_FAILURE,
+    ) -> None:
         if persisted_execution is not None:
             try:
                 await persistence.finalize(
@@ -338,23 +361,42 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     response_status=status_code,
                     response_reference="failed",
                     lease_token=reserved_idem.lease_token,
+                    failure_code=failure_code,
                 )
-            except PersistenceConflict:
+            except (PersistenceConflict, PersistenceUnavailable):
                 pass
             return
-        await _release_preflight_lease(
-            db, request, reserved_idem.key, reserved_idem.lease_token, status_code,
-        )
+        try:
+            await _release_preflight_lease(
+                db, request, reserved_idem.key, reserved_idem.lease_token, status_code,
+            )
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     prepared = None
     try:
         prepared = await boundary.prepare()
     except BudgetExceeded as exc:
-        await fail_preflight(429)
+        await fail_preflight(429, FailureCode.BUDGET_REJECTED)
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Execution budget exceeded.") from exc
     except BudgetUnavailable as exc:
-        await fail_preflight(503)
+        await fail_preflight(503, FailureCode.DATABASE_FAILURE)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution budget unavailable.") from exc
+    except RetryLimitExceeded as exc:
+        await fail_preflight(409, FailureCode.RETRY_EXHAUSTED)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Execution retry limit was reached.") from exc
+    except PersistenceConflict as exc:
+        await fail_preflight(409, FailureCode.IDEMPOTENCY_CONFLICT)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Execution recovery was rejected.") from exc
+    except PersistenceUnavailable as exc:
+        await fail_preflight(503, FailureCode.DATABASE_FAILURE)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution persistence is unavailable.") from exc
+    except SQLAlchemyError as exc:
+        await fail_preflight(503, FailureCode.DATABASE_FAILURE)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution database is unavailable.") from exc
     except HTTPException as exc:
         await fail_preflight(exc.status_code)
         raise
@@ -377,11 +419,28 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     execution_id = persisted_execution.execution_id
     assistant_message_id = persisted_execution.assistant_message_id
 
+    async def finalize_failure(code: FailureCode, content: str = "") -> bool:
+        policy = failure_policy(code)
+        return await persistence.finalize(
+            execution_id=execution_id,
+            terminal_status="cancelled" if code is FailureCode.CLIENT_CANCELLED else "failed",
+            content=content,
+            response_status=policy.response_status,
+            response_reference="failed",
+            lease_token=lease_token,
+            failure_code=code,
+        )
+
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
-            full_response = await provider.generate_chat_completion(model=bot.model, messages=provider_messages,
-                                                                     system_prompt=effective_system_prompt)
+            full_response = await provider_with_timeout(
+                provider.generate_chat_completion(
+                    model=bot.model, messages=provider_messages,
+                    system_prompt=effective_system_prompt,
+                ),
+                settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
+            )
             if lease_lost is not None and lease_lost.is_set():
                 raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
             verified = False
@@ -391,8 +450,15 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 try:
                     verifier_bot = await _find_verifier_bot(db, bot, org_id)
                     verifier = await _provider_for_bot(verifier_bot, org_id)
-                    result = await verify_answer(primary_answer=full_response, original_prompt=payload.prompt,
-                                                 verifier=verifier, model=verifier_bot.model)
+                    result = await provider_with_timeout(
+                        verify_answer(
+                            primary_answer=full_response,
+                            original_prompt=payload.prompt,
+                            verifier=verifier,
+                            model=verifier_bot.model,
+                        ),
+                        settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
+                    )
                 except Exception:
                     result = _verification_failure(full_response, "Verifikationskontrollen kunne ikke gennemføres.")
                 full_response = result.answer
@@ -414,20 +480,47 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             ):
                 raise HTTPException(status_code=409, detail="Execution was already finalized.")
             return response_payload
-        except HTTPException:
-            await persistence.finalize(
-                execution_id=execution_id, terminal_status="failed", content="",
-                response_status=409, response_reference="failed", lease_token=lease_token,
-            )
-            raise
-        except Exception:
+        except asyncio.TimeoutError as exc:
             try:
-                await persistence.finalize(
-                    execution_id=execution_id, terminal_status="failed", content="",
-                    response_status=500, response_reference="failed", lease_token=lease_token,
-                )
+                await finalize_failure(FailureCode.PROVIDER_TIMEOUT)
             except PersistenceConflict:
                 pass
+            except PersistenceUnavailable as persistence_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Execution persistence is unavailable.",
+                ) from persistence_exc
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="AI provider timed out.",
+            ) from exc
+        except asyncio.CancelledError:
+            try:
+                await finalize_failure(FailureCode.CLIENT_CANCELLED)
+            except (PersistenceConflict, PersistenceUnavailable):
+                pass
+            raise
+        except HTTPException:
+            try:
+                await finalize_failure(FailureCode.IDEMPOTENCY_LOST)
+            except (PersistenceConflict, PersistenceUnavailable):
+                pass
+            raise
+        except PersistenceUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution persistence is unavailable.",
+            ) from exc
+        except Exception:
+            try:
+                await finalize_failure(FailureCode.PROVIDER_FAILURE)
+            except PersistenceConflict:
+                pass
+            except PersistenceUnavailable as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Execution persistence is unavailable.",
+                ) from exc
             raise HTTPException(status_code=502, detail="AI provider could not fulfil the request.")
         finally:
             await _stop_lease_heartbeat(heartbeat_task, lease_lost)
@@ -440,6 +533,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         verification_reason = None
         pump = None
         verification_task = None
+        stream_failure_code = FailureCode.PROVIDER_FAILURE
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
 
         async def apply_terminal(terminal: StreamTerminal, content: str) -> None:
@@ -457,10 +551,11 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 if not completed:
                     raise RuntimeError("execution was already finalized")
                 return
-            failure_status = 499 if terminal is StreamTerminal.CANCELLED else 500
+            policy = failure_policy(stream_failure_code)
             await persistence.finalize(
                 execution_id=execution_id, terminal_status=terminal.value, content=content,
-                response_status=failure_status, response_reference="failed", lease_token=lease_token,
+                response_status=policy.response_status, response_reference="failed", lease_token=lease_token,
+                failure_code=stream_failure_code,
             )
 
         finalizer = StreamFinalizer(apply_terminal)
@@ -487,10 +582,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                 elif event.kind is StreamEventKind.END:
                     break
                 elif event.kind is StreamEventKind.DISCONNECTED:
+                    stream_failure_code = FailureCode.CLIENT_CANCELLED
                     raise asyncio.CancelledError()
                 elif event.kind is StreamEventKind.LEASE_LOST:
+                    stream_failure_code = FailureCode.IDEMPOTENCY_LOST
                     raise RuntimeError("idempotency lease was lost during AI processing")
                 elif event.kind is StreamEventKind.TIMEOUT:
+                    stream_failure_code = FailureCode.PROVIDER_TIMEOUT
                     raise RuntimeError("provider stream timed out")
             await pump.aclose()
             pump = None
@@ -500,9 +598,14 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     try:
                         verifier_bot = await _find_verifier_bot(db, bot, org_id)
                         verifier = await _provider_for_bot(verifier_bot, org_id)
-                        return await verify_answer(
-                            primary_answer=accumulated, original_prompt=payload.prompt,
-                            verifier=verifier, model=verifier_bot.model,
+                        return await provider_with_timeout(
+                            verify_answer(
+                                primary_answer=accumulated,
+                                original_prompt=payload.prompt,
+                                verifier=verifier,
+                                model=verifier_bot.model,
+                            ),
+                            settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
                         )
                     except Exception:
                         return _verification_failure(
@@ -535,6 +638,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             await finalizer.finalize(StreamTerminal.COMPLETED, accumulated)
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified, 'verification_status': verification_status, 'verification_reason': verification_reason})}\n\n"
         except asyncio.CancelledError:
+            stream_failure_code = FailureCode.CLIENT_CANCELLED
             try:
                 await finalizer.finalize(StreamTerminal.CANCELLED, accumulated)
             except Exception:

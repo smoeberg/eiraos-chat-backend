@@ -212,6 +212,37 @@ async def test_completed_replay_after_finish(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_expired_completed_key_creates_a_new_record_generation(session_factory):
+    from eiraos.core.idempotency import begin_idempotency, complete_idempotency
+
+    key = f"conc-{os.getpid()}-expired-generation"
+    org_id, user_id = 42, 90
+    await _clean_key(session_factory, org_id, user_id, key)
+
+    first_request = _make_request(b'{"generation":1}', org_id=org_id, user_id=user_id)
+    async with session_factory() as session:
+        first = await begin_idempotency(session, first_request, key)
+        await complete_idempotency(
+            session, first_request, key, 200, '{"ok":true}', lease_token=first.lease_token,
+        )
+        await session.execute(
+            text(
+                "UPDATE idempotency_records SET expires_at = NOW() - INTERVAL '1 minute' "
+                "WHERE id = :record_id"
+            ),
+            {"record_id": first.record_id},
+        )
+        await session.commit()
+
+    second_request = _make_request(b'{"generation":2}', org_id=org_id, user_id=user_id)
+    async with session_factory() as session:
+        second = await begin_idempotency(session, second_request, key)
+    assert second.status == "processing"
+    assert second.record_id != first.record_id
+    assert not second.is_recovery
+
+
+@pytest.mark.asyncio
 async def test_stale_lease_allows_reclaim(session_factory):
     from eiraos.core.idempotency import begin_idempotency
 

@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from typing import Optional
 
 WELL_KNOWN_SECRETS = {
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     EXECUTION_BUDGET_MAX_COST: float = 20000.0
     USER_BUDGET_REMAINING: float | None = None
     ORGANIZATION_BUDGET_REMAINING: float | None = None
+    CHAT_PROVIDER_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
+    CHAT_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
     # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False
     STORAGE_ROOT: str = "storage/uploads"

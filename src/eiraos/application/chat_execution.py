@@ -14,6 +14,7 @@ class IdempotencyReservation:
     lease_token: str | None
     cached_response: dict[str, Any] | None = None
     record_id: int | None = None
+    is_recovery: bool = False
 
     @property
     def is_replay(self) -> bool:
