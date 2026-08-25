@@ -86,6 +86,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(ratelimit.AUTH_REGISTER_LIMIT)
 async def register_user(request: Request, payload: UserRegister, db: AsyncSession = Depends(get_db)):
+    if not settings.ALLOW_PUBLIC_REGISTER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is disabled.",
+        )
     result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalars().first()
     if existing:

@@ -39,6 +39,7 @@ def test_env_example_documents_complete_production_contract():
     required = {
         "APP_ENV", "RELEASE_SHA", "DATABASE_URL", "SECRET_KEY", "REDIS_URL",
         "CORS_ORIGINS", "TRUSTED_HOSTS", "TRUSTED_PROXY_CIDRS",
+        "ALLOW_PUBLIC_REGISTER",
     }
     assert required <= values.keys()
     assert values["APP_ENV"] == "production"
@@ -46,6 +47,7 @@ def test_env_example_documents_complete_production_contract():
     assert values["CORS_ORIGINS"].startswith("https://")
     assert values["TRUSTED_PROXY_CIDRS"] == "replace-with-ingress-proxy-cidr"
     assert values["SECRET_KEY"] == "change-me"
+    assert values["ALLOW_PUBLIC_REGISTER"] == "false"
 
 
 def test_compose_uses_validated_production_settings_for_api_and_worker():
@@ -53,6 +55,7 @@ def test_compose_uses_validated_production_settings_for_api_and_worker():
     assert compose.count("APP_ENV: production") == 2
     assert compose.count("REDIS_URL: redis://redis:6379/0") == 2
     assert compose.count("RELEASE_SHA: ${RELEASE_SHA:?RELEASE_SHA must be set}") == 2
+    assert compose.count('ALLOW_PUBLIC_REGISTER: "false"') == 2
     assert "REDIS_HOST" not in compose and "REDIS_PORT" not in compose
     assert sum(line.strip().startswith("CORS_ORIGINS:") for line in compose.splitlines()) == 2
     assert sum(line.strip().startswith("TRUSTED_HOSTS:") for line in compose.splitlines()) == 2
@@ -64,6 +67,7 @@ def test_kubernetes_api_and_worker_fail_closed_on_required_redis():
     for manifest in (api, worker):
         assert "APP_ENV" in manifest and 'value: "production"' in manifest
         assert "CORS_ORIGINS" in manifest and "TRUSTED_HOSTS" in manifest
+        assert 'name: ALLOW_PUBLIC_REGISTER\n          value: "false"' in manifest
         assert "key: redis-url" in manifest
         redis_block = manifest[manifest.index("key: redis-url"):]
         assert not redis_block.lstrip().startswith("key: redis-url\n              optional: true")
