@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +6,8 @@ from sqlalchemy import select
 from eiraos.core.database import get_db
 from eiraos.domains.organizations.models import Organization, OrganizationMember
 from eiraos.api.v1.auth import get_current_user, require_permission
+from eiraos.core import ratelimit
+from eiraos.core.ratelimit import limiter
 
 router = APIRouter(prefix="/organizations", tags=["Organizations & Multi-Tenancy"])
 
@@ -20,7 +22,9 @@ class OrganizationResponseSchema(BaseModel):
     slug: str
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=OrganizationResponseSchema)
+@limiter.limit(ratelimit.ORGANIZATION_CREATE_LIMIT)
 async def create_organization(
+    request: Request,
     payload: OrganizationCreateSchema,
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user)

@@ -63,3 +63,7 @@ limiter = Limiter(
 AUTH_LOGIN_LIMIT = "5/minute"
 AUTH_REGISTER_LIMIT = "5/minute"
 AUTH_VERIFY_LIMIT = "5/minute"
+
+# Creating a tenant has durable storage and authorization consequences. Keep
+# this stricter than the global request limit while still allowing onboarding.
+ORGANIZATION_CREATE_LIMIT = "5/minute"
