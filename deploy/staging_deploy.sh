@@ -33,6 +33,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-backend}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 CORS_ORIGINS="${CORS_ORIGINS:-https://app.staging.eiraos.ai}"
 TRUSTED_HOSTS="${TRUSTED_HOSTS:-api.staging.eiraos.ai,127.0.0.1}"
+: "${TRUSTED_PROXY_CIDRS:?Set TRUSTED_PROXY_CIDRS to the staging ingress proxy CIDR(s)}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -67,7 +68,8 @@ kubectl -n "$NS" apply -f deploy/k8s/hpa.yaml
 if kubectl -n "$NS" get "deployment/${DEPLOY_NAME}" >/dev/null 2>&1; then
   kubectl -n "$NS" set env "deployment/${DEPLOY_NAME}" \
     APP_ENV=staging RELEASE_SHA="$GIT_SHA" \
-    CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
+    CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS" \
+    TRUSTED_PROXY_CIDRS="$TRUSTED_PROXY_CIDRS"
   kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" \
     "${CONTAINER_NAME}=${IMAGE}" \
     || kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" "*=${IMAGE}"
@@ -77,7 +79,8 @@ else
 fi
 kubectl -n "$NS" set env deployment/eiraos-worker \
   APP_ENV=staging RELEASE_SHA="$GIT_SHA" \
-  CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
+  CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS" \
+  TRUSTED_PROXY_CIDRS="$TRUSTED_PROXY_CIDRS"
 kubectl -n "$NS" set image deployment/eiraos-worker worker="$IMAGE"
 
 # ---------- 4. migrate (one-off pod) ----------

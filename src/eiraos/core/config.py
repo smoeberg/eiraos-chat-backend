@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator, model_validator
 from typing import Optional
 from urllib.parse import urlsplit
+from ipaddress import ip_network
 
 WELL_KNOWN_SECRETS = {
     "super-secret-production-key-change-me",
@@ -42,6 +43,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     CORS_ORIGINS: str = "http://localhost:3000"
     TRUSTED_HOSTS: str = "localhost,127.0.0.1,testserver"
+    TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32"
     MAX_REQUEST_BODY_BYTES: int = Field(default=2 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
 
     @field_validator("APP_ENV")
@@ -90,6 +92,10 @@ class Settings(BaseSettings):
     def _production_ingress_must_fail_closed(self):
         origins = self.cors_origins
         hosts = self.trusted_hosts
+        try:
+            proxy_networks = self.trusted_proxy_networks
+        except ValueError as exc:
+            raise ValueError("trusted proxy CIDRs must be valid IP networks") from exc
         if not origins:
             raise ValueError("at least one CORS origin is required")
         if not hosts:
@@ -105,6 +111,10 @@ class Settings(BaseSettings):
                 raise ValueError("production CORS origins must be explicit HTTPS origins")
             if any(not _public_host(host) for host in hosts):
                 raise ValueError("production trusted hosts must be explicit public hosts")
+            if not proxy_networks:
+                raise ValueError("production requires explicit trusted proxy CIDRs")
+            if any(network.prefixlen == 0 for network in proxy_networks):
+                raise ValueError("production trusted proxy CIDRs cannot trust every address")
         return self
 
     @property
@@ -114,6 +124,13 @@ class Settings(BaseSettings):
     @property
     def trusted_hosts(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(item.strip().lower() for item in self.TRUSTED_HOSTS.split(",") if item.strip()))
+
+    @property
+    def trusted_proxy_networks(self):
+        return tuple(dict.fromkeys(
+            ip_network(item.strip(), strict=False)
+            for item in self.TRUSTED_PROXY_CIDRS.split(",") if item.strip()
+        ))
 
     class Config:
         env_file = ".env"

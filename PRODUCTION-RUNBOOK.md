@@ -27,6 +27,9 @@ This runbook guides system operators through deploying and managing the enterpri
 
    Pin both backend and worker to the exact image digest qualified in staging;
    never deploy the mutable `latest` tag in production.
+   Set `TRUSTED_PROXY_CIDRS` to only the ingress-controller source CIDRs. The
+   application disables Uvicorn proxy-header rewriting and validates the
+   forwarding chain itself; never use `0.0.0.0/0` or `::/0`.
 
 3. **Verify Deployment & Health:**
    ```bash
