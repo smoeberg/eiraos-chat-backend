@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
-
 import arq
 import httpx
 import structlog
@@ -14,21 +12,13 @@ from eiraos.core.config import settings
 from eiraos.core.database import async_session_maker
 from eiraos.domains.documents.models import Document, DocumentChunk
 from eiraos.domains.documents.rag_service import RAGService
+from eiraos.workers.redis_config import redis_settings_from_url
 
 logger = structlog.get_logger()
 
 
 def _redis_settings() -> RedisSettings:
-    url = (settings.REDIS_URL or "").strip()
-    if not url:
-        return RedisSettings(host="localhost", port=6379)
-    parsed = urlparse(url)
-    return RedisSettings(
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 6379,
-        database=int((parsed.path or "/0").lstrip("/") or 0),
-        password=parsed.password,
-    )
+    return redis_settings_from_url(settings.REDIS_URL)
 
 
 async def _embed(text_content: str) -> list[float] | None:
