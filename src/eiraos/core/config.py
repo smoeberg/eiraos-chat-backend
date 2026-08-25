@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = "super-secret-production-key-change-me"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60, ge=1, le=1440)
     JWT_ISSUER: str = "eiraos"
     JWT_AUDIENCE: str = "eiraos-api"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos"
@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     def _environment_must_be_known(cls, value):
         if value not in {"development", "staging", "production"}:
             raise ValueError("APP_ENV must be development, staging or production")
+        return value
+
+    @field_validator("ALGORITHM")
+    @classmethod
+    def _jwt_algorithm_must_be_symmetric_and_explicit(cls, value):
+        if value not in {"HS256", "HS384", "HS512"}:
+            raise ValueError("ALGORITHM must be HS256, HS384 or HS512")
         return value
 
     @field_validator("SECRET_KEY")

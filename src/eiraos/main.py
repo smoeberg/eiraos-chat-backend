@@ -17,7 +17,7 @@ from eiraos.core.config import settings
 from eiraos.core.ratelimit import limiter
 from eiraos.core.database import AsyncSessionLocal
 from eiraos.api.v1.router import api_router
-from eiraos.api.v1.auth import get_current_user
+from eiraos.api.v1.auth import get_current_active_organization, get_current_user
 from eiraos.core.exceptions import EiraOSException
 from eiraos.core.middleware import SecurityHeadersMiddleware, TenantIsolationMiddleware, RequestTracingMiddleware, RequestBodyLoggingMiddleware
 from eiraos.core.logging import setup_logging
@@ -99,7 +99,10 @@ Instrumentator().instrument(app)
 
 
 @app.get("/metrics", include_in_schema=False)
-async def metrics(current_user: dict = Depends(get_current_user)):
+async def metrics(
+    _current_user: dict = Depends(get_current_user),
+    _organization_id: int = Depends(get_current_active_organization),
+):
     return Response(
         content=prometheus_client.generate_latest(),
         media_type="text/plain; version=0.0.4; charset=utf-8",

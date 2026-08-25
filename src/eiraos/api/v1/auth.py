@@ -4,7 +4,7 @@ import uuid
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import jwt
@@ -24,8 +24,8 @@ router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
-TOKEN_ISSUER = "eiraos"
-TOKEN_AUDIENCE = "eiraos-api"
+TOKEN_ISSUER = settings.JWT_ISSUER
+TOKEN_AUDIENCE = settings.JWT_AUDIENCE
 
 # Compatibility view for callers that still inspect the legacy mapping. The
 # authority source itself now lives in the governance domain.
@@ -44,7 +44,7 @@ class TokenResponse(BaseModel):
 
 class UserRegister(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12, max_length=128)
     full_name: Optional[str] = None
 
 class UserResponse(BaseModel):
@@ -57,10 +57,16 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (TypeError, ValueError):
+        return False
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
+
+
+_DUMMY_PASSWORD_HASH = get_password_hash(uuid.uuid4().hex)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
@@ -117,10 +123,9 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     result = await db.execute(select(User).where((User.email == form_data.username) | (User.username == form_data.username)))
     user = result.scalars().first()
 
-    if not user or not user.is_enabled or not user.password_hash:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-
-    if not verify_password(form_data.password, user.password_hash):
+    candidate_hash = user.password_hash if user and user.is_enabled and user.password_hash else _DUMMY_PASSWORD_HASH
+    password_valid = verify_password(form_data.password, candidate_hash)
+    if not user or not user.is_enabled or not user.password_hash or not password_valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
     org_res = await db.execute(select(OrganizationMember).where(OrganizationMember.user_id == user.id))
@@ -154,13 +159,25 @@ async def get_current_user(
             algorithms=[settings.ALGORITHM],
             issuer=TOKEN_ISSUER,
             audience=TOKEN_AUDIENCE,
+            options={"require": [
+                "exp", "iat", "jti", "iss", "aud", "sub", "user_id",
+                "organization_id", "token_version",
+            ]},
         )
-        email: str = payload.get("sub")
-        user_id: int = payload.get("user_id")
+        email = payload.get("sub")
+        user_id = payload.get("user_id")
         role: str = payload.get("role", "member")
-        org_id: int = payload.get("organization_id")
+        org_id = payload.get("organization_id")
+        token_version = payload.get("token_version")
+        jti = payload.get("jti")
 
-        if not email or not user_id or not org_id:
+        if (
+            not isinstance(email, str) or not email
+            or type(user_id) is not int or user_id <= 0
+            or type(org_id) is not int or org_id <= 0
+            or type(token_version) is not int or token_version <= 0
+            or not isinstance(jti, str) or not jti
+        ):
             raise credentials_exception
 
         ctx = {
@@ -168,8 +185,8 @@ async def get_current_user(
             "user_id": user_id,
             "role": role,
             "organization_id": org_id,
-            "jti": payload.get("jti"),
-            "token_version": payload.get("token_version", 1),
+            "jti": jti,
+            "token_version": token_version,
         }
         if request is not None:
             request.state.organization_id = org_id
@@ -199,11 +216,10 @@ async def get_current_active_organization(
     if not membership:
         raise HTTPException(status_code=403, detail="User is not a member of this organization")
 
-    async def _load_user_version():
-        u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-        return u.token_version if u else None
-    db_version = await _load_user_version()
-    if db_version is not None and current_user.get("token_version") != db_version:
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_enabled:
+        raise HTTPException(status_code=401, detail="Identity is inactive")
+    if current_user.get("token_version") != user.token_version:
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     if request is not None:
@@ -239,7 +255,11 @@ def require_permission(required_permission: str):
     return permission_dependency
 
 @router.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def read_users_me(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _organization_id: int = Depends(get_current_active_organization),
+):
     result = await db.execute(select(User).where(User.id == current_user["user_id"]))
     user = result.scalars().first()
     if not user:
