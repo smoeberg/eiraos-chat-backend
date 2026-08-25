@@ -38,6 +38,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" pytest pytest-asyncio httpx
 
+      - name: Audit Python dependencies
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit
+
       - name: Verify database migration chain
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos_test

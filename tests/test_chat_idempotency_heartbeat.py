@@ -10,10 +10,13 @@ from eiraos.api.v1 import chat
 async def test_lease_heartbeat_renews_until_cancelled(monkeypatch):
     calls = 0
     real_sleep = asyncio.sleep
+    renewed_twice = asyncio.Event()
 
     async def renew(_db, _request, _key, _token):
         nonlocal calls
         calls += 1
+        if calls >= 2:
+            renewed_twice.set()
         return True
 
     async def fast_sleep(_seconds):
@@ -26,7 +29,7 @@ async def test_lease_heartbeat_renews_until_cancelled(monkeypatch):
 
     lost = asyncio.Event()
     task = asyncio.create_task(chat._lease_heartbeat(SimpleNamespace(), SimpleNamespace(), "k", "t", lost))
-    await real_sleep(0.01)
+    await asyncio.wait_for(renewed_twice.wait(), timeout=0.5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
