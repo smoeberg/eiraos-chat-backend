@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, text
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
 
 from eiraos.core.database import Base
 
@@ -8,6 +8,7 @@ from eiraos.core.database import Base
 class MemoryRecord(Base):
     __tablename__ = "memory_records"
     __table_args__ = (
+        UniqueConstraint("item_id", name="uq_memory_records_item_id"),
         CheckConstraint(
             "memory_class IN ('persistent_memory', 'user_org_knowledge')",
             name="ck_memory_records_durable_class",
@@ -32,7 +33,7 @@ class MemoryRecord(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    item_id = Column(String(64), nullable=False, unique=True, index=True)
+    item_id = Column(String(64), nullable=False)
     organization_id = Column(Integer, nullable=False, index=True)
     owner_user_id = Column(Integer, nullable=True, index=True)
     actor_user_id = Column(Integer, nullable=False)

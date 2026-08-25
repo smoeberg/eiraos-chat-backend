@@ -30,13 +30,13 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(500), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("deleted_at", sa.DateTime(), nullable=True),
+        sa.UniqueConstraint("item_id", name="uq_memory_records_item_id"),
         sa.CheckConstraint("memory_class IN ('persistent_memory', 'user_org_knowledge')", name="ck_memory_records_durable_class"),
         sa.CheckConstraint("(scope_kind = 'user' AND owner_user_id IS NOT NULL) OR (scope_kind = 'organization' AND owner_user_id IS NULL)", name="ck_memory_records_scope_owner"),
         sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], name="fk_memory_records_org"),
         sa.ForeignKeyConstraint(["actor_user_id", "organization_id"], ["organization_members.user_id", "organization_members.organization_id"], name="fk_memory_records_actor_member"),
         sa.ForeignKeyConstraint(["owner_user_id", "organization_id"], ["organization_members.user_id", "organization_members.organization_id"], name="fk_memory_records_owner_member"),
     )
-    op.create_index("ix_memory_records_item_id", "memory_records", ["item_id"], unique=True)
     op.create_index("ix_memory_records_organization_id", "memory_records", ["organization_id"])
     op.create_index("ix_memory_records_owner_user_id", "memory_records", ["owner_user_id"])
     op.create_index("ix_memory_records_tenant_scope", "memory_records", ["organization_id", "scope_kind", "owner_user_id"])

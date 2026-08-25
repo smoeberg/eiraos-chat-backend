@@ -11,6 +11,7 @@ from eiraos.application.memory_runtime import DurableMemoryStore, MemoryBoundary
 from eiraos.core.database import Base
 from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.domains.identity.models import User
+from eiraos.domains.memory.models import MemoryRecord
 from eiraos.domains.organizations.models import Organization, OrganizationMember
 
 
@@ -103,3 +104,5 @@ def test_memory_api_is_capability_gated_and_migration_is_head():
     assert permissions == {"memory:read", "memory:write", "memory:delete"}
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
     assert scripts.get_current_head() == "011_memory_runtime"
+    constraints = {constraint.name for constraint in MemoryRecord.__table__.constraints}
+    assert "uq_memory_records_item_id" in constraints
