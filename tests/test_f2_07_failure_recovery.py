@@ -80,7 +80,7 @@ def test_primary_and_verifier_provider_calls_share_the_timeout_boundary():
     from eiraos.api.v1.chat import create_chat_completion
 
     source = inspect.getsource(create_chat_completion)
-    assert source.count("provider_with_timeout(") == 3
+    assert source.count("provider_isolation.execute(") == 3
 
 
 @pytest.mark.asyncio

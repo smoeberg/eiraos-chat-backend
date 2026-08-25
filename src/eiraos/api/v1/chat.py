@@ -32,7 +32,12 @@ from eiraos.application.chat_persistence import (
     RetryLimitExceeded,
     execution_identity,
 )
-from eiraos.application.chat_recovery import FailureCode, failure_policy, provider_with_timeout
+from eiraos.application.chat_recovery import FailureCode, failure_policy
+from eiraos.application.provider_failure_isolation import (
+    IsolatedProviderFailure,
+    ProviderFailureIsolation,
+    require_text,
+)
 from eiraos.application.streaming_lifecycle import (
     StreamEventKind,
     StreamFinalizer,
@@ -515,15 +520,18 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             failure_code=code,
         )
 
+    provider_isolation = ProviderFailureIsolation()
+
     if not payload.stream:
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
-            full_response = await provider_with_timeout(
+            full_response = await provider_isolation.execute(
                 provider.complete(
                     model=bot.model, messages=provider_messages,
                     system_prompt=effective_system_prompt,
                 ),
                 settings.CHAT_PROVIDER_TIMEOUT_SECONDS,
+                validate=require_text,
             )
             if lease_lost is not None and lease_lost.is_set():
                 raise HTTPException(status_code=409, detail="Idempotency lease was lost during AI processing.")
@@ -536,7 +544,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                         db, bot, org_id, current_user["authorization"],
                     )
                     verifier = await _provider_for_bot(verifier_bot, org_id, verifier_permit)
-                    result = await provider_with_timeout(
+                    result = await provider_isolation.execute(
                         verify_answer(
                             primary_answer=full_response,
                             original_prompt=payload.prompt,
@@ -566,9 +574,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             ):
                 raise HTTPException(status_code=409, detail="Execution was already finalized.")
             return response_payload
-        except asyncio.TimeoutError as exc:
+        except IsolatedProviderFailure as exc:
             try:
-                await finalize_failure(FailureCode.PROVIDER_TIMEOUT)
+                await finalize_failure(exc.failure_code)
             except PersistenceConflict:
                 pass
             except PersistenceUnavailable as persistence_exc:
@@ -577,8 +585,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                     detail="Execution persistence is unavailable.",
                 ) from persistence_exc
             raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="AI provider timed out.",
+                status_code=exc.response_status,
+                detail=str(exc),
             ) from exc
         except asyncio.CancelledError:
             try:
@@ -649,8 +657,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             if not await persistence.mark_streaming(execution_id):
                 raise RuntimeError("execution was already finalized")
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
-            stream = provider.stream(model=bot.model, messages=provider_messages,
-                                     system_prompt=effective_system_prompt)
+            stream = provider_isolation.stream(provider.stream(
+                model=bot.model, messages=provider_messages,
+                system_prompt=effective_system_prompt,
+            ))
             pump = StreamPump(
                 stream,
                 is_disconnected=request.is_disconnected,
@@ -686,7 +696,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
                             db, bot, org_id, current_user["authorization"],
                         )
                         verifier = await _provider_for_bot(verifier_bot, org_id, verifier_permit)
-                        return await provider_with_timeout(
+                        return await provider_isolation.execute(
                             verify_answer(
                                 primary_answer=accumulated,
                                 original_prompt=payload.prompt,
@@ -732,6 +742,13 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             except Exception:
                 pass
             raise
+        except IsolatedProviderFailure as exc:
+            stream_failure_code = exc.failure_code
+            try:
+                await finalizer.finalize(StreamTerminal.FAILED, accumulated)
+            except Exception:
+                pass
+            yield f"data: {json.dumps({'type': 'error', 'detail': _sanitize()})}\n\n"
         except Exception:
             try:
                 await finalizer.finalize(StreamTerminal.FAILED, accumulated)
