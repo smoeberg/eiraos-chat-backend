@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from eiraos.api.v1.auth import get_current_active_organization, require_permission
 from eiraos.application.memory import MemoryClass
 from eiraos.application.memory_runtime import DurableMemoryStore, MemoryBoundaryError
+from eiraos.application.provenance import ProvenanceNotFound, ProvenanceResolver
 from eiraos.core.database import get_db
 
 
@@ -67,3 +68,14 @@ async def delete_memory(item_id: str, current_user: dict = Depends(require_permi
     if not deleted:
         raise HTTPException(404, detail="Memory item not found")
     return Response(status_code=204)
+
+
+@router.get("/{item_id}/provenance")
+async def get_memory_provenance(item_id: str, current_user: dict = Depends(require_permission("memory:read")), org_id: int = Depends(get_current_active_organization), db: AsyncSession = Depends(get_db)):
+    try:
+        return await ProvenanceResolver(db).trace(
+            item_id=item_id, organization_id=org_id,
+            user_id=current_user["user_id"],
+        )
+    except ProvenanceNotFound as exc:
+        raise HTTPException(404, detail="Memory item not found") from exc
