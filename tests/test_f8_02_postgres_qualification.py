@@ -188,3 +188,37 @@ async def test_postgres_qualification_crash_recovery_is_bounded_and_reuses_rows(
             assert tuple(exhausted) == ("failed", "retry_exhausted", False)
     finally:
         await cleanup(pg_factory, ids)
+
+
+@pytest.mark.asyncio
+async def test_postgres_rejects_cross_tenant_document_chunk(pg_factory):
+    suffix = uuid.uuid4().hex
+    async with pg_factory() as session:
+        org_id = (await session.execute(text(
+            "INSERT INTO organizations (name, slug) VALUES (:n, :s) RETURNING id"
+        ), {"n": f"doc-org-{suffix}", "s": f"doc-org-{suffix}"})).scalar_one()
+        other_org_id = (await session.execute(text(
+            "INSERT INTO organizations (name, slug) VALUES (:n, :s) RETURNING id"
+        ), {"n": f"doc-other-{suffix}", "s": f"doc-other-{suffix}"})).scalar_one()
+        document_id = (await session.execute(text(
+            "INSERT INTO documents (organization_id, title, status) "
+            "VALUES (:o, 'tenant document', 'queued') RETURNING id"
+        ), {"o": org_id})).scalar_one()
+        await session.commit()
+
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await session.execute(text(
+                    "INSERT INTO document_chunks "
+                    "(organization_id, document_id, content) "
+                    "VALUES (:other, :document, 'cross tenant')"
+                ), {"other": other_org_id, "document": document_id})
+
+        await session.execute(
+            text("DELETE FROM documents WHERE id=:document"),
+            {"document": document_id},
+        )
+        await session.execute(text(
+            "DELETE FROM organizations WHERE id IN (:org, :other)"
+        ), {"org": org_id, "other": other_org_id})
+        await session.commit()

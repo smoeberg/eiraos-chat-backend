@@ -56,5 +56,6 @@ async def enqueue_document_ingestion(
         organization_id,
         content,
         knowledge_scope,
+        _job_id=f"document-ingest:{organization_id}:{document_id}",
     )
     return job.job_id if job else None

@@ -30,7 +30,11 @@ async def test_process_document_ingestion_document_not_found(monkeypatch):
     class FakeSession:
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
-        async def get(self, model, pk): return None
+        async def execute(self, statement):
+            class Result:
+                @staticmethod
+                def scalar_one_or_none(): return None
+            return Result()
         async def commit(self): pass
 
     monkeypatch.setattr(tasks, "async_session_maker", lambda: FakeSession())
