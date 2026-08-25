@@ -2,6 +2,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import re
+import time
 import uuid
 import structlog
 
@@ -34,12 +35,25 @@ class RequestTracingMiddleware(BaseHTTPMiddleware):
         request_id = supplied if _REQUEST_ID.fullmatch(supplied) else str(uuid.uuid4())
         request.state.request_id = request_id
         structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(request_id=request_id, path=request.url.path)
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id, path=request.url.path, method=request.method,
+        )
+        started = time.perf_counter()
 
         try:
             response: Response = await call_next(request)
             response.headers["X-Request-ID"] = request_id
+            logger.info(
+                "request_completed", status_code=response.status_code,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
             return response
+        except Exception as exc:
+            logger.exception(
+                "request_failed", error_type=type(exc).__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+            raise
         finally:
             structlog.contextvars.clear_contextvars()
 

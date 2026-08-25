@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +16,7 @@ from sqlalchemy import text
 
 from eiraos.core.config import settings
 from eiraos.core.ratelimit import limiter
-from eiraos.core.database import AsyncSessionLocal
+from eiraos.core.database import AsyncSessionLocal, engine
 from eiraos.api.v1.router import api_router
 from eiraos.api.v1.auth import get_current_active_organization, get_current_user
 from eiraos.core.exceptions import EiraOSException
@@ -25,11 +26,21 @@ from eiraos.core.logging import setup_logging
 setup_logging()
 logger = structlog.get_logger()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        await engine.dispose()
+
+
 app = FastAPI(
     title="EiraOS Enterprise Chat Backend",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url=None if settings.APP_ENV == "production" else "/docs",
+    redoc_url=None if settings.APP_ENV == "production" else "/redoc",
+    lifespan=lifespan,
 )
 
 app.state.limiter = limiter
@@ -61,9 +72,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
-app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TenantIsolationMiddleware)
-app.add_middleware(RequestTracingMiddleware)
 app.add_middleware(RequestBodyLoggingMiddleware)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
 
@@ -79,6 +88,8 @@ app.add_middleware(
         "Idempotency-Key",
     ],
 )
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestTracingMiddleware)
 
 @app.exception_handler(EiraOSException)
 async def eiraos_exception_handler(request: Request, exc: EiraOSException):
@@ -123,25 +134,28 @@ async def health_ready():
                 session.execute(text("SELECT 1")), timeout=_probe_timeout
             )
             health_status["database"] = "connected"
-    except Exception as e:
-        logger.error("health_check_database_failed", error=str(e))
+    except Exception as exc:
+        logger.error("health_check_database_failed", error_type=type(exc).__name__)
         health_status["status"] = "degraded"
         health_status["database"] = "unavailable"
 
     if not settings.REDIS_URL:
         health_status["redis"] = "disabled"
     else:
+        redis_client = None
         try:
             redis_client = aioredis.from_url(
                 settings.REDIS_URL, encoding="utf-8", decode_responses=True
             )
             await asyncio.wait_for(redis_client.ping(), timeout=_probe_timeout)
-            await redis_client.close()
             health_status["redis"] = "connected"
-        except Exception as e:
-            logger.error("health_check_redis_failed", error=str(e))
+        except Exception as exc:
+            logger.error("health_check_redis_failed", error_type=type(exc).__name__)
             health_status["status"] = "degraded"
             health_status["redis"] = "unavailable"
+        finally:
+            if redis_client is not None:
+                await redis_client.aclose()
 
     status_code = (
         status.HTTP_200_OK
@@ -156,4 +170,8 @@ async def health_check():
 
 @app.get("/", tags=["System"])
 async def root():
-    return {"system": "EiraOS Chat Backend", "version": "1.0.0", "status": "active", "docs": "/docs"}
+    return {
+        "system": "EiraOS Chat Backend", "version": "1.0.0",
+        "status": "active",
+        "docs": None if settings.APP_ENV == "production" else "/docs",
+    }
