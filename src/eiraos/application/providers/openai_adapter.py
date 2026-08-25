@@ -3,6 +3,7 @@ import json
 import logging
 import httpx
 from eiraos.application.providers.base import ProviderCapabilities
+from eiraos.application.providers.http import decode_completion, normalized_base_url, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.openai")
@@ -28,9 +29,13 @@ def _unpack_message(data) -> str:
 class OpenAIProviderAdapter:
     MODEL_CATALOG = ("gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini")
 
-    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1"):
+    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1", *, transport=None):
         self.api_key = api_key
-        self.base_url = base_url
+        self.base_url = normalized_base_url(base_url)
+        self._transport = transport
+
+    def _client(self, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=timeout, transport=self._transport)
 
     async def complete(
         self,
@@ -45,23 +50,22 @@ class OpenAIProviderAdapter:
             formatted_messages.append({"role": "system", "content": system_prompt})
         formatted_messages.extend(messages)
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": formatted_messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": False
-                }
-            )
-            try:
-                response.raise_for_status()
-                return _unpack_message(response.json())
-            except httpx.HTTPError as e:
-                raise EiraOSException(title="Upstream request failed", detail=f"Completion request failed (HTTP {e.response.status_code}).", status_code=502)
+        try:
+            async with self._client(60.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "messages": formatted_messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False
+                    }
+                )
+                return decode_completion(response, "OpenAI", _unpack_message)
+        except httpx.HTTPError as exc:
+            raise upstream_failure("OpenAI", exc) from exc
 
     async def stream(
         self,
@@ -77,8 +81,9 @@ class OpenAIProviderAdapter:
         formatted_messages.extend(messages)
 
         corrupt_chunks = 0
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
+        try:
+            async with self._client(120.0) as client:
+                async with client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
@@ -89,23 +94,29 @@ class OpenAIProviderAdapter:
                     "max_tokens": max_tokens,
                     "stream": True
                 }
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        delta = chunk["choices"][0]["delta"]
-                        if "content" in delta and delta["content"]:
-                            yield delta["content"]
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                        corrupt_chunks += 1
-                        logger.warning("openai_stream_skipped_corrupt_chunk", extra={"skip_chunk_count": corrupt_chunks})
-                        continue
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if chunk.get("error"):
+                                raise upstream_failure("OpenAI")
+                            delta = chunk["choices"][0]["delta"]
+                            if "content" in delta and delta["content"]:
+                                yield delta["content"]
+                        except EiraOSException:
+                            raise
+                        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                            corrupt_chunks += 1
+                            logger.warning("openai_stream_skipped_corrupt_chunk", extra={"skip_chunk_count": corrupt_chunks})
+                            continue
+        except httpx.HTTPError as exc:
+            raise upstream_failure("OpenAI", exc) from exc
 
     def models(self) -> tuple[str, ...]:
         return self.MODEL_CATALOG
