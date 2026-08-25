@@ -29,9 +29,12 @@ def client():
 def test_g1_3_require_permission_queries_organization_member():
     """RBAC must load membership from DB, not trust JWT role alone."""
     from eiraos.api.v1 import auth as auth_mod
+    from eiraos.application.authorization import AuthorizationBoundary
 
-    src = inspect.getsource(auth_mod.require_permission)
-    assert "OrganizationMember" in src
+    adapter_source = inspect.getsource(auth_mod.require_permission)
+    boundary_source = inspect.getsource(AuthorizationBoundary.authorize)
+    assert "AuthorizationBoundary" in adapter_source
+    assert "OrganizationMember" in boundary_source
 
 
 def test_g1_6_metrics_requires_auth(client):
