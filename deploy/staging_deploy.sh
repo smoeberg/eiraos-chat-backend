@@ -5,7 +5,8 @@
 # Required env:
 #   DATABASE_URL, REDIS_URL, SECRET_KEY
 # Optional:
-#   REGISTRY, IMAGE_NAME, NS, OPENAI_API_KEY, BASE_URL, EMAIL, PASSWORD
+#   REGISTRY, IMAGE_NAME, NS, OPENAI_API_KEY, CORS_ORIGINS, TRUSTED_HOSTS,
+#   BASE_URL, EMAIL, PASSWORD
 #
 # Usage:
 #   export DATABASE_URL=postgresql+asyncpg://...
@@ -23,13 +24,15 @@ IMAGE="${REGISTRY}/${IMAGE_NAME}:${GIT_SHA}"
 
 # Deployment / service names (override if manifests differ)
 DEPLOY_NAME="${DEPLOY_NAME:-eiraos-chat-backend}"
-SVC_NAME="${SVC_NAME:-eiraos-chat-backend}"
+SVC_NAME="${SVC_NAME:-eiraos-chat-backend-svc}"
 CONTAINER_NAME="${CONTAINER_NAME:-backend}"
 
 : "${DATABASE_URL:?Set DATABASE_URL (postgresql+asyncpg://...)}"
 : "${REDIS_URL:?Set REDIS_URL (redis://...)}"
 : "${SECRET_KEY:?Set SECRET_KEY (e.g. openssl rand -hex 32)}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+CORS_ORIGINS="${CORS_ORIGINS:-https://app.staging.eiraos.ai}"
+TRUSTED_HOSTS="${TRUSTED_HOSTS:-api.staging.eiraos.ai,127.0.0.1}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -46,20 +49,24 @@ docker push "$IMAGE"
 
 # ---------- 2. secrets ----------
 kubectl -n "$NS" create secret generic eiraos-secrets \
-  --from-literal=SECRET_KEY="$SECRET_KEY" \
-  --from-literal=DATABASE_URL="$DATABASE_URL" \
-  --from-literal=REDIS_URL="$REDIS_URL" \
-  --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+  --from-literal=jwt-secret-key="$SECRET_KEY" \
+  --from-literal=database-url="$DATABASE_URL" \
+  --from-literal=redis-url="$REDIS_URL" \
+  --from-literal=openai-api-key="$OPENAI_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # ---------- 3. manifests ----------
 kubectl -n "$NS" apply -f deploy/k8s/networkpolicy.yaml
+kubectl -n "$NS" apply -f deploy/k8s/worker-networkpolicy.yaml
 kubectl -n "$NS" apply -f deploy/k8s/service.yaml
 kubectl -n "$NS" apply -f deploy/k8s/deployment.yaml
+kubectl -n "$NS" apply -f deploy/k8s/worker.yaml
 kubectl -n "$NS" apply -f deploy/k8s/hpa.yaml
 
 # Point deployment at the image we just pushed
 if kubectl -n "$NS" get "deployment/${DEPLOY_NAME}" >/dev/null 2>&1; then
+  kubectl -n "$NS" set env "deployment/${DEPLOY_NAME}" \
+    APP_ENV=staging CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
   kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" \
     "${CONTAINER_NAME}=${IMAGE}" \
     || kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" "*=${IMAGE}"
@@ -67,6 +74,9 @@ else
   echo "WARN: deployment/${DEPLOY_NAME} not found after apply — check deploy/k8s/deployment.yaml metadata.name"
   kubectl -n "$NS" get deploy
 fi
+kubectl -n "$NS" set env deployment/eiraos-worker \
+  APP_ENV=staging CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
+kubectl -n "$NS" set image deployment/eiraos-worker worker="$IMAGE"
 
 # ---------- 4. migrate (one-off pod) ----------
 kubectl -n "$NS" delete pod eiraos-migrate --ignore-not-found >/dev/null 2>&1 || true
@@ -78,7 +88,12 @@ kubectl -n "$NS" run eiraos-migrate --rm -i --restart=Never \
         \"name\": \"migrate\",
         \"image\": \"${IMAGE}\",
         \"command\": [\"alembic\", \"upgrade\", \"head\"],
-        \"envFrom\": [{\"secretRef\": {\"name\": \"eiraos-secrets\"}}]
+        \"env\": [
+          {\"name\": \"APP_ENV\", \"value\": \"staging\"},
+          {\"name\": \"DATABASE_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"database-url\"}}},
+          {\"name\": \"SECRET_KEY\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"jwt-secret-key\"}}},
+          {\"name\": \"REDIS_URL\", \"valueFrom\": {\"secretKeyRef\": {\"name\": \"eiraos-secrets\", \"key\": \"redis-url\"}}}
+        ]
       }],
       \"restartPolicy\": \"Never\"
     }
@@ -88,6 +103,7 @@ kubectl -n "$NS" run eiraos-migrate --rm -i --restart=Never \
 if kubectl -n "$NS" get "deployment/${DEPLOY_NAME}" >/dev/null 2>&1; then
   kubectl -n "$NS" rollout status "deployment/${DEPLOY_NAME}" --timeout=180s
 fi
+kubectl -n "$NS" rollout status deployment/eiraos-worker --timeout=180s
 kubectl -n "$NS" get pods -o wide
 
 # ---------- 6. smoke ----------

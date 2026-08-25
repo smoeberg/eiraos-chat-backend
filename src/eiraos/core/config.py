@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False
     STORAGE_ROOT: str = "storage/uploads"
-    OPENAI_API_KEY: Optional[str] = "sk-placeholder"
+    OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     CORS_ORIGINS: str = "http://localhost:3000"
@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     @field_validator("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
     @classmethod
     def _api_keys_must_be_real_in_non_dev(cls, v, info):
+        if isinstance(v, str) and not v.strip():
+            return None
         env = info.data.get("APP_ENV", "development")
         if env in ("development",) or v is None:
             return v

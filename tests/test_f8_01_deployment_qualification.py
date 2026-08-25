@@ -1,0 +1,82 @@
+from pathlib import Path
+
+from eiraos.core.config import Settings
+
+
+ROOT = Path(__file__).parents[1]
+
+
+def read(path):
+    return (ROOT / path).read_text()
+
+
+def test_release_image_contains_migration_runtime():
+    dockerfile = read("Dockerfile")
+    assert "COPY alembic.ini ./alembic.ini" in dockerfile
+    assert "COPY alembic/ ./alembic/" in dockerfile
+    assert "USER 10001" in dockerfile
+
+
+def test_compose_uses_validated_production_settings_for_api_and_worker():
+    compose = read("docker-compose.yml")
+    assert compose.count("APP_ENV: production") == 2
+    assert compose.count("REDIS_URL: redis://redis:6379/0") == 2
+    assert "REDIS_HOST" not in compose and "REDIS_PORT" not in compose
+    assert sum(line.strip().startswith("CORS_ORIGINS:") for line in compose.splitlines()) == 2
+    assert sum(line.strip().startswith("TRUSTED_HOSTS:") for line in compose.splitlines()) == 2
+
+
+def test_kubernetes_api_and_worker_fail_closed_on_required_redis():
+    api = read("deploy/k8s/deployment.yaml")
+    worker = read("deploy/k8s/worker.yaml")
+    for manifest in (api, worker):
+        assert "APP_ENV" in manifest and 'value: "production"' in manifest
+        assert "CORS_ORIGINS" in manifest and "TRUSTED_HOSTS" in manifest
+        assert "key: redis-url" in manifest
+        redis_block = manifest[manifest.index("key: redis-url"):]
+        assert not redis_block.lstrip().startswith("key: redis-url\n              optional: true")
+        assert "allowPrivilegeEscalation: false" in manifest
+        assert "readOnlyRootFilesystem: true" in manifest
+        assert "namespace:" not in manifest
+
+
+def test_staging_secret_contract_matches_manifests_and_updates_worker():
+    script = read("deploy/staging_deploy.sh")
+    for key in ("jwt-secret-key", "database-url", "redis-url", "openai-api-key"):
+        assert f"--from-literal={key}=" in script
+    assert "apply -f deploy/k8s/worker.yaml" in script
+    assert "apply -f deploy/k8s/worker-networkpolicy.yaml" in script
+    assert "set image deployment/eiraos-worker" in script
+    assert 'SVC_NAME="${SVC_NAME:-eiraos-chat-backend-svc}"' in script
+    assert "rollout status deployment/eiraos-worker" in script
+    assert '\\"name\\": \\"DATABASE_URL\\"' in script
+    assert '\\"key\\": \\"database-url\\"' in script
+    assert '\\"envFrom\\"' not in script
+
+
+def test_production_can_boot_without_unused_platform_provider_key():
+    config = Settings(
+        APP_ENV="production", SECRET_KEY="s" * 48,
+        OPENAI_API_KEY=None, REDIS_URL="redis://redis:6379/0",
+        CORS_ORIGINS="https://app.example.com",
+        TRUSTED_HOSTS="api.example.com",
+    )
+    assert config.OPENAI_API_KEY is None
+
+
+def test_worker_network_policy_denies_ingress_and_bounds_egress():
+    policy = read("deploy/k8s/worker-networkpolicy.yaml")
+    assert "app: eiraos-worker" in policy
+    assert "ingress: []" in policy
+    for port in (53, 443, 5432, 6379):
+        assert f"port: {port}" in policy
+
+
+def test_blank_optional_provider_key_is_normalized_to_absent():
+    config = Settings(
+        APP_ENV="production", SECRET_KEY="s" * 48,
+        OPENAI_API_KEY="", REDIS_URL="redis://redis:6379/0",
+        CORS_ORIGINS="https://app.example.com",
+        TRUSTED_HOSTS="api.example.com",
+    )
+    assert config.OPENAI_API_KEY is None

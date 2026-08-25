@@ -15,14 +15,18 @@ This runbook guides system operators through deploying and managing the enterpri
    kubectl create namespace eiraos-production
    kubectl create secret generic eiraos-secrets \
      --from-literal=database-url='postgresql+asyncpg://user:pass@postgres-host:5432/db' \
+     --from-literal=redis-url='redis://redis-host:6379/0' \
      --from-literal=jwt-secret-key='your-super-secure-production-secret-key' \
      -n eiraos-production
    ```
 
 2. **Apply Kubernetes Manifests:**
    ```bash
-   kubectl apply -f deploy/k8s/
+   kubectl -n eiraos-production apply -f deploy/k8s/
    ```
+
+   Pin both backend and worker to the exact image digest qualified in staging;
+   never deploy the mutable `latest` tag in production.
 
 3. **Verify Deployment & Health:**
    ```bash
@@ -33,3 +37,10 @@ This runbook guides system operators through deploying and managing the enterpri
 ## Observability & Metrics
 - **Prometheus Metrics:** Exposed at `/metrics` (automatically scraped by Prometheus operators).
 - **Structured JSON Logs:** Outputted to stdout, compatible with Datadog, ELK, and Grafana Loki.
+
+## Release gate
+
+Run migrations from the same qualified image before rollout, wait for backend
+and worker deployments, require `/health/ready` HTTP 200, then execute
+`scripts/gate12_staging_smoke.sh`. Roll back the deployment if any step fails;
+database rollback requires a separately reviewed migration plan.
