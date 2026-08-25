@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from eiraos.core.database import get_db
-from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
+from eiraos.api.v1.auth import get_current_active_organization, require_permission
 from eiraos.domains.conversations.models import Conversation, Message
 from eiraos.domains.agents.models import Bot
 from eiraos.domains.documents.rag_service import RAGService
@@ -241,9 +241,9 @@ def _verification_failure(primary_answer: str, reason: str) -> VerificationResul
     )
 
 
-@router.post("/completions", dependencies=[Depends(require_permission("conversation:create"))])
+@router.post("/completions")
 async def create_chat_completion(request: Request, payload: ChatCompletionRequest,
-                                 current_user: dict = Depends(get_current_user),
+                                 current_user: dict = Depends(require_permission("conversation:create")),
                                  org_id: int = Depends(get_current_active_organization),
                                  db: AsyncSession = Depends(get_db)):
     reserved_idem = IdempotencyReservation(None, None)

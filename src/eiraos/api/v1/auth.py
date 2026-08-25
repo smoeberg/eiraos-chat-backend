@@ -16,7 +16,8 @@ from eiraos.core import ratelimit
 from eiraos.core.ratelimit import limiter
 from eiraos.domains.identity.models import User
 from eiraos.domains.organizations.models import Organization, OrganizationMember
-from eiraos.domains.governance.capabilities import ROLE_CAPABILITIES, Capability
+from eiraos.domains.governance.capabilities import ROLE_CAPABILITIES
+from eiraos.application.authorization import AuthorizationBoundary, AuthorizationDenied
 
 router = APIRouter(prefix="/auth", tags=["Authentication & Identity"])
 
@@ -211,7 +212,7 @@ async def get_current_active_organization(
     return org_id
 
 def require_permission(required_permission: str):
-    """Enforce permission using *current* DB membership role (not stale JWT role)."""
+    """Transport adapter for the single application authorization boundary."""
     async def permission_dependency(
         current_user: dict = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
@@ -221,29 +222,19 @@ def require_permission(required_permission: str):
         if not user_id or not org_id:
             raise HTTPException(status_code=403, detail="Invalid organization context")
 
-        res = await db.execute(
-            select(OrganizationMember).where(
-                OrganizationMember.user_id == user_id,
-                OrganizationMember.organization_id == org_id,
-            )
-        )
-        membership = res.scalars().first()
-        if not membership:
-            raise HTTPException(status_code=403, detail="User is not a member of this organization")
-
-        role = membership.role or "member"
-        current_user["role"] = role
-
         try:
-            required_capability = Capability(required_permission)
-        except ValueError:
-            required_capability = None
-        permissions = ROLE_CAPABILITIES.get(role, frozenset())
-        if required_capability is None or required_capability not in permissions:
+            context = await AuthorizationBoundary(db).authorize(
+                identity=current_user,
+                capability=required_permission,
+                resource_organization_id=org_id,
+            )
+        except AuthorizationDenied:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied: missing required permission '{required_permission}'"
             )
+        current_user["role"] = context.role
+        current_user["authorization"] = context
         return current_user
     return permission_dependency
 
