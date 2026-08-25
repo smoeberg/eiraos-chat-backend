@@ -8,6 +8,7 @@ import arq
 import httpx
 import structlog
 from arq.connections import RedisSettings
+from sqlalchemy import select
 
 from eiraos.core.config import settings
 from eiraos.core.database import async_session_maker
@@ -58,10 +59,26 @@ async def process_document_ingestion(
     """Document lifecycle: queued -> processing -> ready | failed."""
     logger.info("document_ingestion_start", document_id=document_id, org_id=organization_id)
     async with async_session_maker() as session:
-        doc = await session.get(Document, document_id)
+        doc = (await session.execute(
+            select(Document).where(
+                Document.id == document_id,
+                Document.organization_id == organization_id,
+            ).with_for_update()
+        )).scalar_one_or_none()
         if doc is None:
-            logger.warning("worker_document_not_found", document_id=document_id)
+            logger.warning(
+                "worker_document_not_found_or_tenant_mismatch",
+                document_id=document_id,
+                org_id=organization_id,
+            )
             return {"status": "not_found", "document_id": document_id}
+        if doc.status == "ready":
+            logger.info(
+                "document_ingestion_already_ready",
+                document_id=document_id,
+                org_id=organization_id,
+            )
+            return {"status": "ready", "document_id": document_id, "replayed": True}
         doc.status = "processing"
         await session.commit()
         try:
