@@ -2,7 +2,7 @@ from typing import List, Dict, Any, AsyncIterator
 import json
 import logging
 import httpx
-from eiraos.application.providers.base import AIProviderProtocol
+from eiraos.application.providers.base import ProviderCapabilities
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.anthropic")
@@ -23,6 +23,8 @@ def _unpack_anthropic_message(data) -> str:
 
 
 class AnthropicProviderAdapter:
+    MODEL_CATALOG = ("claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022")
+
     def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com/v1"):
         self.api_key = api_key
         self.base_url = base_url
@@ -34,7 +36,7 @@ class AnthropicProviderAdapter:
             "content-type": "application/json",
         }
 
-    async def generate_chat_completion(
+    async def complete(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -59,7 +61,7 @@ class AnthropicProviderAdapter:
             except httpx.HTTPError:
                 raise EiraOSException(title="Upstream request failed", detail="Anthropic request failed.", status_code=502)
 
-    async def stream_chat_completion(
+    async def stream(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -94,3 +96,16 @@ class AnthropicProviderAdapter:
                         delta = event.get("delta", {})
                         if delta.get("type") == "text_delta":
                             yield delta.get("text", "")
+
+    def models(self) -> tuple[str, ...]:
+        return self.MODEL_CATALOG
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(streaming=True)
+
+    async def generate_chat_completion(self, *args, **kwargs) -> str:
+        return await self.complete(*args, **kwargs)
+
+    async def stream_chat_completion(self, *args, **kwargs) -> AsyncIterator[str]:
+        async for chunk in self.stream(*args, **kwargs):
+            yield chunk

@@ -8,7 +8,7 @@ class FakeStreamProvider:
     def __init__(self):
         self.models = []
 
-    async def stream_chat_completion(self, messages, model, temperature=0.7, max_tokens=1000, system_prompt=None):
+    async def stream(self, messages, model, temperature=0.7, max_tokens=1000, system_prompt=None):
         self.models.append(model)
         yield "ok"
 

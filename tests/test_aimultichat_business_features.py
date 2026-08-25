@@ -43,11 +43,11 @@ class FakeProvider:
         self.response = response
         self.calls = []
 
-    async def generate_chat_completion(self, **kwargs):
+    async def complete(self, **kwargs):
         self.calls.append(kwargs)
         return self.response
 
-    async def stream_chat_completion(self, **kwargs):
+    async def stream(self, **kwargs):
         yield self.response
 
 

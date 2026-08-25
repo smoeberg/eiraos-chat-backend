@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from eiraos.application.providers.base import AIProviderProtocol
+from eiraos.application.providers.base import ChatProvider
 
 VERIFICATION_SYSTEM_PROMPT = (
     "Du er en streng kvalitetskontrol- og verifikations-AI mod hallusinationer. "
@@ -59,7 +59,7 @@ async def verify_answer(
     *,
     primary_answer: str,
     original_prompt: str,
-    verifier: AIProviderProtocol,
+    verifier: ChatProvider,
     model: str,
 ) -> VerificationResult:
     """Verify a primary answer; only explicit PASS is marked verified."""
@@ -68,7 +68,7 @@ async def verify_answer(
         {"role": "assistant", "content": f"FORESLÅET SVAR, DER SKAL VERIFICERES:\n{primary_answer}"},
         {"role": "user", "content": "Verificér nu det foreslåede svar. Returnér kun din kvalitetskontrol som JSON."},
     ]
-    raw = await verifier.generate_chat_completion(
+    raw = await verifier.complete(
         model=model,
         messages=verification_messages,
         system_prompt=VERIFICATION_SYSTEM_PROMPT,

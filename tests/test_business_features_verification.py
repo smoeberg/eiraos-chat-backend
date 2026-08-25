@@ -14,7 +14,7 @@ class FakeVerifier:
         self.raw = raw
         self.calls = []
 
-    async def generate_chat_completion(self, **kwargs):
+    async def complete(self, **kwargs):
         self.calls.append(kwargs)
         return self.raw
 

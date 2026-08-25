@@ -519,7 +519,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
         try:
             full_response = await provider_with_timeout(
-                provider.generate_chat_completion(
+                provider.complete(
                     model=bot.model, messages=provider_messages,
                     system_prompt=effective_system_prompt,
                 ),
@@ -649,8 +649,8 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             if not await persistence.mark_streaming(execution_id):
                 raise RuntimeError("execution was already finalized")
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
-            stream = provider.stream_chat_completion(model=bot.model, messages=provider_messages,
-                                                     system_prompt=effective_system_prompt)
+            stream = provider.stream(model=bot.model, messages=provider_messages,
+                                     system_prompt=effective_system_prompt)
             pump = StreamPump(
                 stream,
                 is_disconnected=request.is_disconnected,

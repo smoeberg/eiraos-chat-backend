@@ -2,7 +2,7 @@ from typing import List, Dict, Any, AsyncIterator
 import json
 import logging
 import httpx
-from eiraos.application.providers.base import AIProviderProtocol
+from eiraos.application.providers.base import ProviderCapabilities
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.gemini")
@@ -27,6 +27,8 @@ def _unpack_gemini_text(data) -> str:
 
 
 class GeminiProviderAdapter:
+    MODEL_CATALOG = ("gemini-1.5-pro", "gemini-1.5-flash")
+
     def __init__(self, api_key: str, base_url: str = "https://generativelanguage.googleapis.com/v1beta"):
         self.api_key = api_key
         self.base_url = base_url
@@ -40,7 +42,7 @@ class GeminiProviderAdapter:
             contents.append({"role": role, "parts": [{"text": m["content"]}]})
         return {"contents": contents}
 
-    async def generate_chat_completion(
+    async def complete(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -59,7 +61,7 @@ class GeminiProviderAdapter:
             except httpx.HTTPError:
                 raise EiraOSException(title="Upstream request failed", detail="Gemini request failed.", status_code=502)
 
-    async def stream_chat_completion(
+    async def stream(
         self,
         messages: List[Dict[str, Any]],
         model: str,
@@ -89,3 +91,16 @@ class GeminiProviderAdapter:
                         for p in parts:
                             if isinstance(p, dict) and "text" in p:
                                 yield p["text"]
+
+    def models(self) -> tuple[str, ...]:
+        return self.MODEL_CATALOG
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(streaming=True)
+
+    async def generate_chat_completion(self, *args, **kwargs) -> str:
+        return await self.complete(*args, **kwargs)
+
+    async def stream_chat_completion(self, *args, **kwargs) -> AsyncIterator[str]:
+        async for chunk in self.stream(*args, **kwargs):
+            yield chunk
