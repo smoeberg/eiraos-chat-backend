@@ -40,9 +40,9 @@ def test_auth_endpoints_have_tight_limits():
 
 
 def test_rate_limiter_takes_remote_address():
-    """GREEN/YELLOW: limiter keys on remote address."""
+    """Limiter keys on the peer/trusted-proxy identity boundary."""
     assert ratelimit.limiter._key_func is not None
-    assert ratelimit.limiter._key_func.__module__ == "slowapi.util"
+    assert ratelimit.limiter._key_func is ratelimit.client_identity
 
 
 def test_rate_limiter_storage_falls_back_to_memory():
