@@ -3,9 +3,12 @@ from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
+from sqlalchemy.orm.exc import StaleDataError
 from eiraos.core.database import get_db
 from eiraos.api.v1.auth import get_current_user, get_current_active_organization, require_permission
 from eiraos.domains.conversations.models import Conversation, Message
+from eiraos.domains.conversations.state import ConversationAggregate, ConversationStateError
+from eiraos.application.conversation_state import apply_conversation, hydrate_conversation, new_conversation
 
 router = APIRouter(prefix="/conversations", tags=["Conversations & History"])
 
@@ -17,6 +20,8 @@ class ConversationResponse(BaseModel):
     user_id: int
     organization_id: int
     title: str
+    lifecycle: str
+    version: int
     created_at: str
     updated_at: str
 
@@ -41,11 +46,15 @@ async def create_conversation(
     org_id: int = Depends(get_current_active_organization),
     db: AsyncSession = Depends(get_db)
 ):
-    conv = Conversation(
-        user_id=current_user["user_id"],
-        organization_id=org_id,
-        title=payload.title
-    )
+    try:
+        aggregate = ConversationAggregate.create(
+            owner_user_id=current_user["user_id"],
+            organization_id=org_id,
+            title=payload.title,
+        )
+    except ConversationStateError as exc:
+        raise HTTPException(status_code=422, detail="Invalid conversation state.") from exc
+    conv = new_conversation(aggregate)
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
@@ -54,6 +63,8 @@ async def create_conversation(
         "user_id": conv.user_id,
         "organization_id": conv.organization_id,
         "title": conv.title,
+        "lifecycle": conv.lifecycle,
+        "version": conv.version,
         "created_at": str(conv.created_at),
         "updated_at": str(conv.updated_at)
     }
@@ -83,6 +94,8 @@ async def list_conversations(
         "user_id": c.user_id,
         "organization_id": c.organization_id,
         "title": c.title,
+        "lifecycle": c.lifecycle,
+        "version": c.version,
         "created_at": str(c.created_at),
         "updated_at": str(c.updated_at)
     } for c in conversations]
@@ -140,6 +153,12 @@ async def delete_conversation(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    await db.delete(conv)
-    await db.commit()
+    aggregate = hydrate_conversation(conv)
+    aggregate.assert_scope(organization_id=org_id, user_id=current_user["user_id"])
+    apply_conversation(conv, aggregate.archive())
+    try:
+        await db.commit()
+    except StaleDataError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Conversation state changed concurrently.") from exc
     return None

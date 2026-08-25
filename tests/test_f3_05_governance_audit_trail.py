@@ -214,7 +214,7 @@ def test_policy_decision_is_persisted_before_idempotency_and_provider():
 
 def test_f3_05_is_single_migration_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["009_cost_accounting"]
+    assert script.get_heads() == ["010_conversation_state"]
     revision = script.get_revision("008_governance_audit")
     assert revision is not None and revision.down_revision == "007_tenant_isolation"
 

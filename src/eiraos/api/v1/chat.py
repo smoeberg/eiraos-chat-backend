@@ -62,6 +62,8 @@ from eiraos.application.governance_audit import (
     request_fingerprint,
 )
 from eiraos.application.cost_accounting import ExecutionCostAccountant
+from eiraos.application.conversation_state import hydrate_conversation
+from eiraos.domains.conversations.state import ConversationStateError
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -295,6 +297,10 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
         ))).scalars().first()
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found or access denied")
+        try:
+            hydrate_conversation(conversation).assert_accepts_execution()
+        except ConversationStateError as exc:
+            raise HTTPException(status_code=409, detail="Conversation is archived.") from exc
         bot = (await db.execute(select(Bot).where(Bot.id == payload.bot_id))).scalars().first()
         if not bot or not _bot_accessible(bot, org_id):
             raise HTTPException(status_code=404, detail="Bot not found or access denied")
