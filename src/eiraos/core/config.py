@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     TRUSTED_HOSTS: str = "localhost,127.0.0.1,testserver"
     TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32"
     MAX_REQUEST_BODY_BYTES: int = Field(default=2 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+    MAX_UPLOAD_REQUEST_BODY_BYTES: int = Field(
+        default=11 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024
+    )
 
     @field_validator("APP_ENV")
     @classmethod
