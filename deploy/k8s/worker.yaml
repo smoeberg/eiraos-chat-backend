@@ -29,6 +29,8 @@ spec:
         env:
         - name: APP_ENV
           value: "production"
+        - name: RELEASE_SHA
+          value: "set-by-release-pipeline"
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:

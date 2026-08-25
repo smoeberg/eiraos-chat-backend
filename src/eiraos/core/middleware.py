@@ -31,12 +31,15 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
 
 class RequestTracingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        from eiraos.core.config import settings
+
         supplied = request.headers.get("X-Request-ID", "")
         request_id = supplied if _REQUEST_ID.fullmatch(supplied) else str(uuid.uuid4())
         request.state.request_id = request_id
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             request_id=request_id, path=request.url.path, method=request.method,
+            release_sha=settings.RELEASE_SHA,
         )
         started = time.perf_counter()
 
