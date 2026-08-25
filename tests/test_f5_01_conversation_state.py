@@ -110,5 +110,5 @@ def test_orm_has_optimistic_version_and_database_lifecycle_constraints():
 
 def test_conversation_state_migration_is_single_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["011_memory_runtime"]
+    assert script.get_heads() == ["012_agent_audit"]
     assert script.get_revision("010_conversation_state").down_revision == "009_cost_accounting"

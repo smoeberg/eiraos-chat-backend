@@ -103,6 +103,6 @@ def test_memory_api_is_capability_gated_and_migration_is_head():
                     permissions.add(cell.cell_contents)
     assert permissions == {"memory:read", "memory:write", "memory:delete"}
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert scripts.get_current_head() == "011_memory_runtime"
+    assert scripts.get_current_head() == "012_agent_audit"
     constraints = {constraint.name for constraint in MemoryRecord.__table__.constraints}
     assert "uq_memory_records_item_id" in constraints
