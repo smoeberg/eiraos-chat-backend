@@ -8,7 +8,9 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "002_idempotency_lease"
-down_revision = "001_authority_token_version_idempotency"
+# Revision 001 is historically named "0019".  The previous symbolic value
+# never existed as a revision ID and broke `alembic upgrade head` on fresh DBs.
+down_revision = "0019"
 branch_labels = None
 depends_on = None
 

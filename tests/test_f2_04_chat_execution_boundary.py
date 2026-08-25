@@ -47,7 +47,7 @@ def _boundary(events, *, authorize=None, idem=None, budget=None, provider=None, 
 async def test_contract_orders_all_preflight_operations():
     events = []
     result = await _boundary(events).prepare()
-    assert events == ["authorize", "idempotency", "budget", "provider", "persistence"]
+    assert events == ["authorize", "idempotency", "budget", "persistence", "provider"]
     assert result.authorized == "scope"
     assert result.provider_context == "provider-context"
     assert not result.is_replay
@@ -76,6 +76,5 @@ async def test_failure_stops_all_later_operations(failure_step):
     persist = AsyncMock(side_effect=error) if failure_step == "persistence" else None
     with pytest.raises(RuntimeError, match=failure_step):
         await _boundary(events, authorize=authorize, idem=idem, budget=budget, provider=provider, persist=persist).prepare()
-    order = ["authorize", "idempotency", "budget", "provider", "persistence"]
+    order = ["authorize", "idempotency", "budget", "persistence", "provider"]
     assert events == order[: order.index(failure_step) + 1]
-

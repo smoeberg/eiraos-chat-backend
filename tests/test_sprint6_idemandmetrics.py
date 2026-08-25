@@ -32,9 +32,9 @@ def test_chat_completions_endpoint_has_request_param():
 
 
 def test_idempotency_begins_before_provider_nonstream():
-    """Assert the non-streaming completion path reserves idempotency."""
+    """Assert non-streaming reserves idempotency and uses atomic finalization."""
     import inspect
     import eiraos.api.v1.chat as chat
     src = inspect.getsource(chat.create_chat_completion)
     assert "begin_idempotency" in src
-    assert "complete_idempotency" in src
+    assert "persistence.finalize" in src

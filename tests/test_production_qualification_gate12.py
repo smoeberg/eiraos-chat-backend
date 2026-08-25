@@ -158,11 +158,14 @@ async def test_g2_2_lease_fencing_accepts_matching_token():
 
 
 def test_g2_3_chat_transitions_same_assistant_row():
-    from eiraos.api.v1 import chat as chat_mod
+    from eiraos.application import chat_persistence
+    from eiraos.domains.conversations.models import Message
 
-    src = inspect.getsource(chat_mod)
-    assert "_transition_assistant" in src
-    assert "async def _transition_assistant" in src
+    src = inspect.getsource(chat_persistence.ChatPersistenceContract.finalize)
+    assert "assistant.content = content" in src
+    assert "assistant.status = terminal_status" in src
+    constraints = {constraint.name for constraint in Message.__table__.constraints}
+    assert "uq_messages_execution_role" in constraints
 
 
 def test_g2_7_sync_fallback_not_client_controlled():

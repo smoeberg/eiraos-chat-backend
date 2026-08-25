@@ -22,6 +22,7 @@ LEASE_RENEWAL_SECONDS = 60
 class IdempotencyOutcome:
     status: str
     lease_token: str | None = None
+    record_id: int | None = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
@@ -83,9 +84,10 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str, *, _at
         .returning(IdempotencyRecord.id)
     )
     result = await db.execute(stmt)
-    if result.scalar_one_or_none() is not None:
+    inserted_id = result.scalar_one_or_none()
+    if inserted_id is not None:
         await db.commit()
-        return IdempotencyOutcome("processing", token)
+        return IdempotencyOutcome("processing", token, int(inserted_id))
     existing = (await db.execute(select(IdempotencyRecord).where(
         IdempotencyRecord.organization_id == org_id, IdempotencyRecord.user_id == user_id,
         IdempotencyRecord.key == key).with_for_update())).scalar_one_or_none()
@@ -104,21 +106,21 @@ async def begin_idempotency(db: AsyncSession, request: Request, key: str, *, _at
         existing.created_at, existing.expires_at = now, expires_at
         existing.lease_until, existing.lease_token = lease_until, token
         await db.commit()
-        return IdempotencyOutcome("processing", token)
+        return IdempotencyOutcome("processing", token, existing.id)
     if existing.status == "completed" and existing.response_reference:
         await db.commit()
-        return IdempotencyOutcome("completed", None)
+        return IdempotencyOutcome("completed", None, existing.id)
     if existing.status == "failed":
         existing.status = "processing"
         existing.response_status = existing.response_reference = None
         existing.lease_until, existing.expires_at, existing.lease_token = lease_until, expires_at, token
         await db.commit()
-        return IdempotencyOutcome("processing", token)
+        return IdempotencyOutcome("processing", token, existing.id)
     lease = _as_utc(existing.lease_until)
     if lease is not None and lease < now:
         existing.lease_until, existing.lease_token, existing.status = lease_until, token, "processing"
         await db.commit()
-        return IdempotencyOutcome("processing", token)
+        return IdempotencyOutcome("processing", token, existing.id)
     await db.commit()
     raise HTTPException(status_code=409, detail="A request with this idempotency key is already in progress.")
 
