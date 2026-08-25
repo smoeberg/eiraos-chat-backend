@@ -62,7 +62,7 @@ async def test_release_decrements_both_scopes_and_deletes_identity_marker():
         CostEstimator(), reservations,
     ).reserve(
         reservation_id="execution-3", user_id=7, organization_id=11,
-        prompt="hello", verify=False, user_limit=1000, organization_limit=5000,
+        prompt="hello", verify=False, user_limit=5000, organization_limit=10000,
     )
     await reservations.release_tenant(reservation.tenant)
     assert len(redis.calls) == 2
