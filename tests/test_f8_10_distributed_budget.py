@@ -66,7 +66,7 @@ async def test_release_decrements_both_scopes_and_deletes_identity_marker():
     )
     await reservations.release_tenant(reservation.tenant)
     assert len(redis.calls) == 2
-    assert redis.calls[1][2] == 3
+    assert redis.calls[1][1] == 3
 
 
 def test_production_requires_explicit_user_and_organization_token_limits():
