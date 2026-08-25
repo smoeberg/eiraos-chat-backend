@@ -11,7 +11,13 @@ def test_production_rejects_well_known_secret_key():
 
 def test_production_accepts_strong_secret_key():
     from eiraos.core.config import Settings
-    s = Settings(APP_ENV="production", SECRET_KEY="x" * 48, OPENAI_API_KEY="sk-real-1234567890abcdef")
+    s = Settings(
+        APP_ENV="production", SECRET_KEY="x" * 48,
+        OPENAI_API_KEY="sk-real-1234567890abcdef",
+        REDIS_URL="redis://redis:6379/0",
+        CORS_ORIGINS="https://app.example.com",
+        TRUSTED_HOSTS="api.example.com",
+    )
     assert s.SECRET_KEY == "x" * 48
 
 

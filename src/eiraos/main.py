@@ -2,6 +2,7 @@ import asyncio
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -64,10 +65,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TenantIsolationMiddleware)
 app.add_middleware(RequestTracingMiddleware)
 app.add_middleware(RequestBodyLoggingMiddleware)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://app.eiraos.ai", "https://admin.eiraos.ai", "http://localhost:3000"],
+    allow_origins=list(settings.cors_origins),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=[
