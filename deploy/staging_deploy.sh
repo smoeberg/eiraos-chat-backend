@@ -19,7 +19,7 @@ set -euo pipefail
 NS="${NS:-eiraos-staging}"
 REGISTRY="${REGISTRY:-ghcr.io/smoeberg}"
 IMAGE_NAME="${IMAGE_NAME:-eiraos-chat-backend}"
-GIT_SHA="$(git rev-parse --short HEAD)"
+GIT_SHA="$(git rev-parse HEAD)"
 IMAGE="${REGISTRY}/${IMAGE_NAME}:${GIT_SHA}"
 
 # Deployment / service names (override if manifests differ)
@@ -66,7 +66,8 @@ kubectl -n "$NS" apply -f deploy/k8s/hpa.yaml
 # Point deployment at the image we just pushed
 if kubectl -n "$NS" get "deployment/${DEPLOY_NAME}" >/dev/null 2>&1; then
   kubectl -n "$NS" set env "deployment/${DEPLOY_NAME}" \
-    APP_ENV=staging CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
+    APP_ENV=staging RELEASE_SHA="$GIT_SHA" \
+    CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
   kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" \
     "${CONTAINER_NAME}=${IMAGE}" \
     || kubectl -n "$NS" set image "deployment/${DEPLOY_NAME}" "*=${IMAGE}"
@@ -75,7 +76,8 @@ else
   kubectl -n "$NS" get deploy
 fi
 kubectl -n "$NS" set env deployment/eiraos-worker \
-  APP_ENV=staging CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
+  APP_ENV=staging RELEASE_SHA="$GIT_SHA" \
+  CORS_ORIGINS="$CORS_ORIGINS" TRUSTED_HOSTS="$TRUSTED_HOSTS"
 kubectl -n "$NS" set image deployment/eiraos-worker worker="$IMAGE"
 
 # ---------- 4. migrate (one-off pod) ----------
@@ -123,6 +125,8 @@ if [[ -n "${BASE_URL:-}" ]]; then
   export BASE_URL
   chmod +x scripts/gate12_staging_smoke.sh
   ./scripts/gate12_staging_smoke.sh
+  python3 scripts/f8_performance_gate.py \
+    --base-url "$BASE_URL" --require-release "$GIT_SHA"
 fi
 
 if [[ -n "${PF_PID}" ]]; then

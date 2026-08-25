@@ -121,7 +121,7 @@ async def metrics(
 
 @app.get("/health/live", tags=["System"])
 async def health_live():
-    return {"status": "alive"}
+    return {"status": "alive", "release_sha": settings.RELEASE_SHA, "version": app.version}
 
 @app.get("/health/ready", tags=["System"])
 async def health_ready():

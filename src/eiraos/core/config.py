@@ -16,6 +16,7 @@ PLACEHOLDER_API_KEYS = {"sk-placeholder", "replace-me", "xxx", ""}
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "EiraOS Chat Backend"
+    RELEASE_SHA: str = Field(default="development", pattern=r"^[A-Za-z0-9._-]{1,64}$")
     APP_ENV: str = "development"  # development | staging | production
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = "super-secret-production-key-change-me"
