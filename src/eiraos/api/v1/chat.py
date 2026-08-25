@@ -329,6 +329,7 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             organization_id=org_id,
             user_id=current_user["user_id"],
             bot_id=authorized.bot.id,
+            bot_organization_id=authorized.bot.organization_id,
             provider=authorized.bot.provider,
             model=authorized.bot.model,
             prompt=payload.prompt,

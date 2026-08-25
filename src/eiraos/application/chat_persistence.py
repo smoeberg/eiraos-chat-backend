@@ -69,6 +69,7 @@ class ChatPersistenceContract:
         organization_id: int,
         user_id: int,
         bot_id: int,
+        bot_organization_id: int,
         provider: str,
         model: str,
         prompt: str,
@@ -89,10 +90,12 @@ class ChatPersistenceContract:
                 or existing.user_id != user_id
                 or existing.conversation_id != conversation_id
                 or existing.bot_id != bot_id
+                or existing.bot_organization_id != bot_organization_id
                 or existing.idempotency_record_id != idempotency_record_id
                 or existing.provider != provider
                 or existing.model != model
             ):
+                await self._db.rollback()
                 raise PersistenceConflict("execution identity is bound to another scope")
             if not recover:
                 await self._db.rollback()
@@ -142,6 +145,7 @@ class ChatPersistenceContract:
             organization_id=organization_id,
             user_id=user_id,
             bot_id=bot_id,
+            bot_organization_id=bot_organization_id,
             idempotency_record_id=idempotency_record_id,
             provider=provider,
             model=model,
@@ -150,12 +154,14 @@ class ChatPersistenceContract:
             max_attempts=max_attempts,
         )
         user_message = Message(
-            conversation_id=conversation_id, execution_id=execution_id,
+            conversation_id=conversation_id, organization_id=organization_id,
+            execution_id=execution_id,
             role="user", content=prompt, bot_id=bot_id,
             status="completed", ai_marked=False,
         )
         assistant_message = Message(
-            conversation_id=conversation_id, execution_id=execution_id,
+            conversation_id=conversation_id, organization_id=organization_id,
+            execution_id=execution_id,
             role="assistant", content="", bot_id=bot_id,
             status="pending", ai_marked=True,
         )

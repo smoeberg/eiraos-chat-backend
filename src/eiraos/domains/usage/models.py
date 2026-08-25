@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eiraos.core.database import Base
@@ -11,6 +11,13 @@ class ProviderUsageRecord(Base):
     """Durable, non-secret accounting record for one provider execution."""
 
     __tablename__ = "provider_usage_records"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["chat_execution_id", "organization_id"],
+            ["chat_executions.id", "chat_executions.organization_id"],
+            name="fk_provider_usage_tenant_execution",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     request_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)

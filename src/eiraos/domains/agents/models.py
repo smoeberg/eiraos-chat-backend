@@ -1,12 +1,17 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, text
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey, UniqueConstraint, text
 from datetime import datetime
 from eiraos.core.database import Base
 
 class Bot(Base):
     __tablename__ = "bots"
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id", name="uq_bots_id_org"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    organization_id = Column(Integer, nullable=False, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", name="fk_bots_org"), nullable=False, index=True,
+    )
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     provider = Column(String, nullable=False, default="openai")
