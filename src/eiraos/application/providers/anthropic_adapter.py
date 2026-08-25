@@ -3,7 +3,7 @@ import json
 import logging
 import httpx
 from eiraos.application.providers.base import ProviderCapabilities
-from eiraos.application.providers.http import decode_completion, normalized_base_url, upstream_failure
+from eiraos.application.providers.http import decode_completion, normalized_base_url, post_with_retry, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.anthropic")
@@ -60,7 +60,10 @@ class AnthropicProviderAdapter:
 
         try:
             async with self._client(60.0) as client:
-                response = await client.post(f"{self.base_url}/messages", headers=self._headers(), json=payload)
+                response = await post_with_retry(
+                    client, f"{self.base_url}/messages", provider="Anthropic",
+                    headers=self._headers(), json=payload,
+                )
                 return decode_completion(response, "Anthropic", _unpack_anthropic_message)
         except httpx.HTTPError as exc:
             raise upstream_failure("Anthropic", exc) from exc

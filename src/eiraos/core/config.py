@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     USER_BUDGET_REMAINING: float | None = None
     ORGANIZATION_BUDGET_REMAINING: float | None = None
     CHAT_PROVIDER_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0)
+    PROVIDER_HTTP_MAX_ATTEMPTS: int = Field(default=2, ge=1, le=3)
+    PROVIDER_HTTP_BACKOFF_SECONDS: float = Field(default=0.1, ge=0, le=2)
+    PROVIDER_HTTP_MAX_RETRY_AFTER_SECONDS: float = Field(default=2.0, ge=0, le=10)
     CHAT_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
     # Dev-only: process document ingest inline if ARQ is down (never client-controlled)
     ALLOW_SYNC_INGEST_FALLBACK: bool = False

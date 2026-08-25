@@ -3,7 +3,7 @@ import json
 import logging
 import httpx
 from eiraos.application.providers.base import ProviderCapabilities
-from eiraos.application.providers.http import decode_completion, normalized_base_url, upstream_failure
+from eiraos.application.providers.http import decode_completion, normalized_base_url, post_with_retry, upstream_failure
 from eiraos.core.exceptions import EiraOSException
 
 logger = logging.getLogger("eiraos.providers.openai")
@@ -52,8 +52,10 @@ class OpenAIProviderAdapter:
 
         try:
             async with self._client(60.0) as client:
-                response = await client.post(
+                response = await post_with_retry(
+                    client,
                     f"{self.base_url}/chat/completions",
+                    provider="OpenAI",
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json={
                         "model": model,
