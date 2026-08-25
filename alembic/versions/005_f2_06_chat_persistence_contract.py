@@ -1,14 +1,14 @@
 """Create the F2-06 chat execution ledger and message bindings.
 
-Revision ID: 005_f2_06_chat_persistence_contract
-Revises: 004_phase2_provider_usage_records
+Revision ID: 005_chat_persistence
+Revises: 004_provider_usage
 """
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "005_f2_06_chat_persistence_contract"
-down_revision = "004_phase2_provider_usage_records"
+revision = "005_chat_persistence"
+down_revision = "004_provider_usage"
 branch_labels = None
 depends_on = None
 

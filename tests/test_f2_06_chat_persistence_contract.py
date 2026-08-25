@@ -137,7 +137,7 @@ async def test_wrong_lease_fails_closed_before_any_terminal_mutation(session):
 
 def test_alembic_has_one_connected_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["005_f2_06_chat_persistence_contract"]
+    assert script.get_heads() == ["005_chat_persistence"]
     revisions = {revision.revision for revision in script.walk_revisions()}
     assert {"000_base_schema", "0019", "002_idempotency_lease", "003_idempotency_lease_token",
-            "004_phase2_provider_usage_records", "005_f2_06_chat_persistence_contract"} <= revisions
+            "004_provider_usage", "005_chat_persistence"} <= revisions
