@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, text
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, CheckConstraint, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, text
 from datetime import datetime
 from eiraos.core.database import Base
 
@@ -12,14 +12,25 @@ class Conversation(Base):
             ["organization_members.user_id", "organization_members.organization_id"],
             name="fk_conversations_member",
         ),
+        CheckConstraint("lifecycle IN ('active', 'archived')", name="ck_conversations_lifecycle"),
+        CheckConstraint("version > 0", name="ck_conversations_version_positive"),
+        CheckConstraint(
+            "(lifecycle = 'active' AND archived_at IS NULL) OR "
+            "(lifecycle = 'archived' AND archived_at IS NOT NULL)",
+            name="ck_conversations_archive_state",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False, index=True)
     organization_id = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
+    lifecycle = Column(String(16), nullable=False, default="active", server_default="active")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    archived_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
 
 class Message(Base):
     __tablename__ = "messages"
