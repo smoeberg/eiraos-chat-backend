@@ -28,10 +28,13 @@ services:
     ports:
       - "8000:8000"
     environment:
+      APP_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:?TRUSTED_HOSTS must be set}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy
@@ -42,9 +45,13 @@ services:
   worker:
     build: .
     environment:
+      APP_ENV: production
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:?TRUSTED_HOSTS must be set}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

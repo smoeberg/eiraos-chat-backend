@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY src/ ./src/
+COPY alembic.ini ./alembic.ini
+COPY alembic/ ./alembic/
 
 ENV PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
