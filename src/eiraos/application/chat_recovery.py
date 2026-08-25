@@ -20,6 +20,7 @@ class FailureCode(str, Enum):
     CLIENT_CANCELLED = "client_cancelled"
     PROCESS_CRASH = "process_crash"
     RETRY_EXHAUSTED = "retry_exhausted"
+    CONTEXT_REJECTED = "context_rejected"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ _POLICIES = {
     FailureCode.CLIENT_CANCELLED: FailurePolicy(499, True),
     FailureCode.PROCESS_CRASH: FailurePolicy(500, True),
     FailureCode.RETRY_EXHAUSTED: FailurePolicy(409, False),
+    FailureCode.CONTEXT_REJECTED: FailurePolicy(422, False),
 }
 
 

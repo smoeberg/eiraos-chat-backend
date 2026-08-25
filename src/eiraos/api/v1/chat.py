@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from eiraos.core.database import get_db
@@ -64,6 +64,12 @@ from eiraos.application.governance_audit import (
 from eiraos.application.cost_accounting import ExecutionCostAccountant
 from eiraos.application.conversation_state import hydrate_conversation
 from eiraos.domains.conversations.state import ConversationStateError
+from eiraos.application.context_construction import (
+    ContextBudgetExceeded,
+    ContextPolicy,
+    ConversationContextBuilder,
+)
+from eiraos.application.providers.capability_discovery import model_metadata
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -174,28 +180,23 @@ async def _release_preflight_lease(db: AsyncSession, request: Request, idem_key:
 async def _build_messages(db: AsyncSession, conversation_id: int, current_prompt: str, system_prompt: str | None,
                           max_history: int = 40, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> list[dict]:
     stmt = (select(Message).where(Message.conversation_id == conversation_id,
-                                  Message.status.in_(["completed", "cancelled"]))
+                                  Message.status == "completed")
             .order_by(Message.created_at.desc(), Message.id.desc()).limit(max_history))
     rows = list((await db.execute(stmt)).scalars().all())
-    budget_chars = max(history_token_budget, 0) * _CHARS_PER_TOKEN
-    selected: list[dict] = []
-    used = 0
-    for m in rows:
-        if m.role not in ("user", "assistant", "system") or not m.content:
-            continue
-        size = len(m.content)
-        if used + size > budget_chars and selected:
-            break
-        selected.append({"role": m.role, "content": m.content})
-        used += size
-    selected.reverse()
-    messages: list[dict] = []
-    if system_prompt and system_prompt.strip():
-        messages.append({"role": "system", "content": system_prompt.strip()})
-    messages.extend(selected)
-    if not messages or messages[-1].get("content") != current_prompt:
-        messages.append({"role": "user", "content": current_prompt})
-    return messages
+    mandatory_chars = len(current_prompt) + len(system_prompt or "")
+    mandatory_tokens = (mandatory_chars + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+    context = ConversationContextBuilder(ContextPolicy(
+        context_window_tokens=max(1001, history_token_budget + mandatory_tokens + 1000),
+        reserved_output_tokens=1000,
+        max_history_tokens=max(history_token_budget, 0),
+        max_history_messages=max_history,
+        chars_per_token=_CHARS_PER_TOKEN,
+    )).build(
+        history_newest_first=rows,
+        current_prompt=current_prompt,
+        system_prompt=system_prompt,
+    )
+    return list(context.messages)
 
 
 def _bot_accessible(bot: Bot, org_id: int) -> bool:
@@ -394,10 +395,33 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             db, org_id, payload.prompt, authorized.knowledge_scope,
         )
         system_prompt = _combined_system_prompt(authorized.bot.system_prompt, knowledge_context)
-        messages = await _build_messages(
-            db, authorized.conversation.id, payload.prompt, system_prompt,
+        if persisted_execution is None:
+            raise PersistenceConflict("execution persistence is missing before context construction")
+        history = list((await db.execute(
+            select(Message).where(
+                Message.conversation_id == authorized.conversation.id,
+                Message.organization_id == org_id,
+                Message.status == "completed",
+                Message.role.in_(["user", "assistant"]),
+                or_(
+                    Message.execution_id.is_(None),
+                    Message.execution_id != persisted_execution.execution_id,
+                ),
+            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(40)
+        )).scalars().all())
+        metadata = model_metadata(authorized.bot.provider, authorized.bot.model)
+        context = ConversationContextBuilder(ContextPolicy(
+            context_window_tokens=metadata.context_window_tokens,
+            reserved_output_tokens=1000,
+            max_history_tokens=DEFAULT_HISTORY_TOKEN_BUDGET,
+            max_history_messages=40,
+            chars_per_token=_CHARS_PER_TOKEN,
+        )).build(
+            history_newest_first=history,
+            current_prompt=payload.prompt,
+            system_prompt=system_prompt,
         )
-        return _ProviderContext(provider, messages, system_prompt)
+        return _ProviderContext(provider, list(context.messages), context.system_prompt)
 
     async def persist_request(authorized: _AuthorizedChat) -> None:
         nonlocal persisted_execution
@@ -494,6 +518,9 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     except SQLAlchemyError as exc:
         await fail_preflight(503, FailureCode.DATABASE_FAILURE)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Execution database is unavailable.") from exc
+    except ContextBudgetExceeded as exc:
+        await fail_preflight(422, FailureCode.CONTEXT_REJECTED)
+        raise HTTPException(status_code=422, detail="Conversation context exceeds the model window.") from exc
     except HTTPException as exc:
         await fail_preflight(exc.status_code)
         raise
