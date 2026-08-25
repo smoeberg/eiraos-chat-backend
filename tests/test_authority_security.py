@@ -168,6 +168,7 @@ class _FakeUserResult:
 class _FakeUser:
     def __init__(self, v):
         self.token_version = v
+        self.is_enabled = True
 
 
 class _FakeDB:
