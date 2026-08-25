@@ -1,4 +1,4 @@
-"""F6-01 tool metadata and registry contract implementation."""
+"""F6 tool metadata, capability declarations, and registry discovery."""
 
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -17,19 +17,33 @@ class ToolNotFoundError(ToolRegistryError):
     """Raised when a requested tool is not registered."""
 
 
+def _normalize_capabilities(capabilities: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Validate and deterministically normalize a tool's capabilities."""
+    normalized: set[str] = set()
+    for capability in capabilities:
+        if not isinstance(capability, str):
+            raise ValueError("capability must be a string")
+        if not capability or capability != capability.strip():
+            raise ValueError("capability must not contain whitespace")
+        segments = capability.split(".")
+        if any(not segment for segment in segments):
+            raise ValueError("capability must contain non-empty dot-separated segments")
+        if any(any(char.isspace() for char in segment) for segment in segments):
+            raise ValueError("capability must not contain whitespace")
+        normalized.add(capability)
+    return tuple(sorted(normalized))
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
-    """Immutable descriptive metadata for a registered tool.
-
-    The registry intentionally contains no execution behaviour, authorization,
-    capability, budget, timeout, or audit logic.
-    """
+    """Immutable descriptive metadata for a registered tool."""
 
     name: str
     version: str
     description: str
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
+    capabilities: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -38,11 +52,14 @@ class Tool:
             raise ValueError("tool version must not be empty")
         if not self.description.strip():
             raise ValueError("tool description must not be empty")
+        if not isinstance(self.capabilities, (tuple, list)):
+            raise ValueError("capabilities must be a sequence of strings")
         object.__setattr__(self, "name", self.name.strip())
         object.__setattr__(self, "version", self.version.strip())
         object.__setattr__(self, "description", self.description.strip())
         object.__setattr__(self, "input_schema", MappingProxyType(dict(self.input_schema)))
         object.__setattr__(self, "output_schema", MappingProxyType(dict(self.output_schema)))
+        object.__setattr__(self, "capabilities", _normalize_capabilities(self.capabilities))
 
 
 class ToolRegistry:
