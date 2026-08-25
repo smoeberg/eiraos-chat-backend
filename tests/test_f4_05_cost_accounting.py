@@ -124,7 +124,7 @@ async def test_terminal_transition_atomically_appends_primary_and_verifier_ledge
 
 def test_cost_accounting_migration_is_single_head():
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["012_agent_audit"]
+    assert script.get_heads() == ["013_document_chunk_tenant_fk"]
 
 
 def test_ledger_exactly_once_key_exists_in_runtime_schema():
