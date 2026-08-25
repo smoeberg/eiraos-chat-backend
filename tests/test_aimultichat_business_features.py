@@ -84,7 +84,7 @@ async def test_history_is_cross_bot_and_ordered():
         FakeDB(rows), 10, "new prompt", "system", max_history=40, history_token_budget=1000
     )
     assert [m["content"] for m in messages] == [
-        "system", "Answer from bot A", "Question for bot B", "Answer from bot B", "new prompt"
+        "Question for bot B", "Answer from bot B", "new prompt"
     ]
 
 

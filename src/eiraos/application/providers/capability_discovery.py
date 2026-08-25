@@ -91,6 +91,14 @@ MODEL_CAPABILITY_CATALOG: Mapping[tuple[str, str], ProviderModelMetadata] = Mapp
 })
 
 
+def model_metadata(provider: str, model: str) -> ProviderModelMetadata:
+    normalized_provider = normalize_provider(provider)
+    metadata = MODEL_CAPABILITY_CATALOG.get((normalized_provider, model))
+    if metadata is None:
+        raise ValueError("model capability metadata is unavailable")
+    return metadata
+
+
 def _implemented(native: ProviderCapabilities, adapter: ProviderCapabilities) -> ProviderCapabilities:
     """Expose only capabilities supported by both model and current adapter."""
 
