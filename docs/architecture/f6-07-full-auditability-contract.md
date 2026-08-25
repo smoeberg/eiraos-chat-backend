@@ -1,6 +1,6 @@
 # F6-07 — Full Auditability Contract
 
-Status: Contract
+Status: Implemented
 Phase: F6-07
 
 ## Purpose
@@ -55,3 +55,14 @@ F6-07 defines auditability only. It does not change planning, authorization, bud
 4. Sensitive data is redacted before persistence.
 5. Required audit-write failures fail closed.
 6. Audit output is sufficient to reconstruct the execution path.
+
+## Runtime implementation
+
+`AgentAuditTrail` appends each critical event to `agent_audit_events` with a
+unique run sequence, stable schema version and tenant/member binding. The F6-06
+async loop requires an audit writer and records every planner, policy, budget,
+tool, observation and terminal transition. Arguments/results are never emitted;
+the writer additionally redacts sensitive keys before every commit. A failed
+critical write raises `AgentAuditUnavailable` and prevents further execution.
+
+Migration head: `012_agent_audit`.

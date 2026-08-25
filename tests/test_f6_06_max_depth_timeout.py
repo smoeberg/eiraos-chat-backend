@@ -12,6 +12,14 @@ STEP = LoopStep("example", "read", {})
 ALLOW = lambda step: AuthorizationDecision(True, "AUTHORIZED")
 
 
+class Recorder:
+    def __init__(self):
+        self.events = []
+
+    async def record(self, event_type, **fields):
+        self.events.append((event_type, fields))
+
+
 @pytest.mark.asyncio
 async def test_depth_is_enforced_before_an_additional_execution():
     calls = []
@@ -26,7 +34,7 @@ async def test_depth_is_enforced_before_an_additional_execution():
         ExecutionBudget(10, 10),
         execute,
         "conversation",
-        limits=AgentRunLimits(2, 2, 1),
+        limits=AgentRunLimits(2, 2, 1), audit=Recorder(),
     )
     assert outcome.status == "DEPTH_LIMIT_REACHED"
     assert outcome.reason_code == "MAX_DEPTH_REACHED"
@@ -50,7 +58,7 @@ async def test_running_tool_is_cancelled_at_tool_timeout():
         ExecutionBudget(2, 10),
         execute,
         "conversation",
-        limits=AgentRunLimits(2, 1, 0.01),
+        limits=AgentRunLimits(2, 1, 0.01), audit=Recorder(),
     )
     assert outcome.status == "TIMEOUT" and outcome.reason_code == "TOOL_TIMEOUT"
     assert outcome.steps == 0 and cancelled.is_set()
@@ -69,7 +77,7 @@ async def test_deadline_covers_async_planning_before_tool_execution():
 
     outcome = await run_agent_loop_async(
         planner, ALLOW, ExecutionBudget(1, 10), execute, "conversation",
-        limits=AgentRunLimits(1, 0.01, 0.005),
+        limits=AgentRunLimits(1, 0.01, 0.005), audit=Recorder(),
     )
     assert outcome.status == "TIMEOUT"
     assert outcome.reason_code == "RUN_DEADLINE_EXCEEDED"
@@ -85,7 +93,7 @@ async def test_non_cancellable_executor_fails_before_planning():
         ExecutionBudget(1, 10),
         lambda step: "unsafe",
         "conversation",
-        limits=AgentRunLimits(1, 1, 1),
+        limits=AgentRunLimits(1, 1, 1), audit=Recorder(),
     )
     assert outcome.status == "DENIED"
     assert outcome.reason_code == "NON_CANCELLABLE_EXECUTOR"
@@ -101,7 +109,7 @@ async def test_async_callable_tool_adapter_is_supported():
     outcome = await run_agent_loop_async(
         lambda conversation, observation: None if observation else STEP,
         ALLOW, ExecutionBudget(1, 10), Adapter(), "conversation",
-        limits=AgentRunLimits(1, 1, 1),
+        limits=AgentRunLimits(1, 1, 1), audit=Recorder(),
     )
     assert outcome.status == "DEPTH_LIMIT_REACHED"
     assert outcome.observation == "done"

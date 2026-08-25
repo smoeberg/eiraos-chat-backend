@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKeyConstraint, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
 
 from eiraos.core.database import Base
 
@@ -56,3 +56,35 @@ class GovernanceDecisionRecord(Base):
     failure_code = Column(String(32), nullable=True)
     decided_at = Column(DateTime, nullable=False, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
     finalized_at = Column(DateTime, nullable=True)
+
+
+class AgentAuditEvent(Base):
+    """Append-only, tenant-bound evidence for one agent lifecycle event."""
+
+    __tablename__ = "agent_audit_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_agent_audit_events_event_id"),
+        UniqueConstraint("run_id", "sequence", name="uq_agent_audit_events_run_sequence"),
+        CheckConstraint("sequence > 0", name="ck_agent_audit_events_sequence_positive"),
+        ForeignKeyConstraint(["organization_id"], ["organizations.id"], name="fk_agent_audit_events_org"),
+        ForeignKeyConstraint(
+            ["user_id", "organization_id"],
+            ["organization_members.user_id", "organization_members.organization_id"],
+            name="fk_agent_audit_events_member",
+        ),
+        Index("ix_agent_audit_events_tenant_run", "organization_id", "run_id", "sequence"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    event_id = Column(String(64), nullable=False)
+    run_id = Column(String(64), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    organization_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    actor_context = Column(String(128), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    schema_version = Column(String(16), nullable=False)
+    outcome = Column(String(64), nullable=True)
+    reason_code = Column(String(64), nullable=True)
+    payload_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
