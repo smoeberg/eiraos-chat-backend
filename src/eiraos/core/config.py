@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from typing import Optional
+from urllib.parse import urlsplit
 
 WELL_KNOWN_SECRETS = {
     "super-secret-production-key-change-me",
@@ -36,6 +37,15 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     CORS_ORIGINS: str = "http://localhost:3000"
+    TRUSTED_HOSTS: str = "localhost,127.0.0.1,testserver"
+    MAX_REQUEST_BODY_BYTES: int = Field(default=2 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+
+    @field_validator("APP_ENV")
+    @classmethod
+    def _environment_must_be_known(cls, value):
+        if value not in {"development", "staging", "production"}:
+            raise ValueError("APP_ENV must be development, staging or production")
+        return value
 
     @field_validator("SECRET_KEY")
     @classmethod
@@ -63,9 +73,65 @@ class Settings(BaseSettings):
             )
         return v
 
+    @model_validator(mode="after")
+    def _production_ingress_must_fail_closed(self):
+        origins = self.cors_origins
+        hosts = self.trusted_hosts
+        if not origins:
+            raise ValueError("at least one CORS origin is required")
+        if not hosts:
+            raise ValueError("at least one trusted host is required")
+        if self.APP_ENV == "production":
+            if not self.REDIS_URL:
+                raise ValueError("production requires Redis-backed rate limiting")
+            if urlsplit(self.REDIS_URL).scheme not in {"redis", "rediss"}:
+                raise ValueError("production Redis URL must use redis:// or rediss://")
+            if self.ALLOW_SYNC_INGEST_FALLBACK:
+                raise ValueError("synchronous ingest fallback is forbidden in production")
+            if any(not _secure_origin(origin) for origin in origins):
+                raise ValueError("production CORS origins must be explicit HTTPS origins")
+            if any(not _public_host(host) for host in hosts):
+                raise ValueError("production trusted hosts must be explicit public hosts")
+        return self
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(item.strip() for item in self.CORS_ORIGINS.split(",") if item.strip()))
+
+    @property
+    def trusted_hosts(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(item.strip().lower() for item in self.TRUSTED_HOSTS.split(",") if item.strip()))
+
     class Config:
         env_file = ".env"
         extra = "ignore"
+
+
+def _secure_origin(origin: str) -> bool:
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+        and "localhost" not in parsed.hostname
+        and parsed.hostname not in {"127.0.0.1", "::1"}
+    )
+
+
+def _public_host(host: str) -> bool:
+    return (
+        bool(host)
+        and "*" not in host
+        and "://" not in host
+        and "/" not in host
+        and not any(char.isspace() for char in host)
+        and "localhost" not in host
+        and host not in {"127.0.0.1", "::1", "testserver"}
+    )
 
 
 settings = Settings()
