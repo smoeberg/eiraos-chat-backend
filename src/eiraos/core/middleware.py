@@ -2,6 +2,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import re
+import tempfile
 import time
 import uuid
 import structlog
@@ -72,6 +73,15 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         from eiraos.core.config import settings
 
+        is_document_upload = (
+            request.method == "POST"
+            and request.url.path == f"{settings.API_V1_STR}/documents/upload"
+        )
+        body_limit = (
+            settings.MAX_UPLOAD_REQUEST_BODY_BYTES
+            if is_document_upload
+            else settings.MAX_REQUEST_BODY_BYTES
+        )
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
@@ -80,12 +90,40 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
                 return self._problem(request, 400, "Invalid Content-Length")
             if declared_size < 0:
                 return self._problem(request, 400, "Invalid Content-Length")
-            if declared_size > settings.MAX_REQUEST_BODY_BYTES:
+            if declared_size > body_limit:
                 return self._problem(request, 413, "Request body too large")
+        # Keep multipart uploads out of the in-memory idempotency buffer. Spool at
+        # most 1 MiB in memory and enforce the total request cap while streaming,
+        # including for requests without Content-Length.
+        if is_document_upload:
+            request.state.cached_body = None
+            spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+            total = 0
+            try:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > body_limit:
+                        return self._problem(request, 413, "Request body too large")
+                    spool.write(chunk)
+                spool.seek(0)
+
+                async def receive_upload():
+                    chunk = spool.read(1024 * 1024)
+                    return {
+                        "type": "http.request",
+                        "body": chunk,
+                        "more_body": bool(chunk),
+                    }
+
+                request._receive = receive_upload
+                request._stream_consumed = False
+                return await call_next(request)
+            finally:
+                spool.close()
         chunks = bytearray()
         async for chunk in request.stream():
             chunks.extend(chunk)
-            if len(chunks) > settings.MAX_REQUEST_BODY_BYTES:
+            if len(chunks) > body_limit:
                 return self._problem(request, 413, "Request body too large")
         body = bytes(chunks)
         request.state.cached_body = body
