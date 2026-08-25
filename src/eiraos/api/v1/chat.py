@@ -23,6 +23,12 @@ from eiraos.core.usage_budget import BudgetExceeded, BudgetUnavailable, UsageBud
 from eiraos.application.usage_execution import ProviderExecutionBudget
 from eiraos.domains.usage.cost_estimator import CostEstimator
 from eiraos.application.chat_execution import ChatExecutionBoundary, IdempotencyReservation
+from eiraos.application.streaming_lifecycle import (
+    StreamEventKind,
+    StreamFinalizer,
+    StreamPump,
+    StreamTerminal,
+)
 
 router = APIRouter(prefix="/chat", tags=["AI Chat Gateway"])
 SSE_HEARTBEAT_SECONDS = 15
@@ -380,9 +386,37 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
 
     async def event_generator() -> AsyncIterator[str]:
         accumulated = ""
-        last_heartbeat = asyncio.get_event_loop().time()
         asst_id = None
+        verified = False
+        verification_status = None
+        verification_reason = None
+        pump = None
+        verification_task = None
         heartbeat_task, lease_lost = await _start_lease_heartbeat(db, request, idem_key, lease_token)
+
+        async def apply_terminal(terminal: StreamTerminal, content: str) -> None:
+            status_value = terminal.value
+            await _transition_assistant(db, asst_id, conversation.id, bot.id, content, status_value)
+            if not idem_key:
+                return
+            if terminal is StreamTerminal.COMPLETED:
+                response_payload = {
+                    "role": "assistant", "content": content, "ai_marked": True,
+                    "verified": verified, "verification_status": verification_status,
+                    "verification_reason": verification_reason,
+                }
+                completed = await idempotency.complete_idempotency(
+                    db, request, idem_key, 200, json.dumps(response_payload), lease_token=lease_token,
+                )
+                if not completed:
+                    raise RuntimeError("idempotency lease was lost before completion")
+                return
+            failure_status = 499 if terminal is StreamTerminal.CANCELLED else 500
+            await idempotency.complete_idempotency(
+                db, request, idem_key, failure_status, "failed", lease_token=lease_token,
+            )
+
+        finalizer = StreamFinalizer(apply_terminal)
         try:
             pending = Message(conversation_id=conversation.id, role="assistant", content="", bot_id=bot.id,
                               status="streaming", ai_marked=True)
@@ -393,35 +427,60 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
             yield f"data: {json.dumps({'type': 'start', 'bot_id': bot.id, 'conversation_id': conversation.id, 'message_id': asst_id})}\n\n"
             stream = provider.stream_chat_completion(model=bot.model, messages=provider_messages,
                                                      system_prompt=effective_system_prompt)
-            try:
-                while True:
-                    chunk = await _next_chunk(stream, SSE_CHUNK_TIMEOUT_SECONDS)
-                    if chunk is None:
+            pump = StreamPump(
+                stream,
+                is_disconnected=request.is_disconnected,
+                lease_lost=lease_lost,
+                heartbeat_seconds=SSE_HEARTBEAT_SECONDS,
+                chunk_timeout_seconds=SSE_CHUNK_TIMEOUT_SECONDS,
+            )
+            while True:
+                event = await pump.next_event()
+                if event.kind is StreamEventKind.CHUNK:
+                    accumulated += event.content or ""
+                    yield f"data: {json.dumps({'type': 'token', 'content': event.content})}\n\n"
+                elif event.kind is StreamEventKind.HEARTBEAT:
+                    yield ": keep-alive\n\n"
+                elif event.kind is StreamEventKind.END:
+                    break
+                elif event.kind is StreamEventKind.DISCONNECTED:
+                    raise asyncio.CancelledError()
+                elif event.kind is StreamEventKind.LEASE_LOST:
+                    raise RuntimeError("idempotency lease was lost during AI processing")
+                elif event.kind is StreamEventKind.TIMEOUT:
+                    raise RuntimeError("provider stream timed out")
+            await pump.aclose()
+            pump = None
+
+            if payload.verify:
+                async def run_verification() -> VerificationResult:
+                    try:
+                        verifier_bot = await _find_verifier_bot(db, bot, org_id)
+                        verifier = await _provider_for_bot(verifier_bot, org_id)
+                        return await verify_answer(
+                            primary_answer=accumulated, original_prompt=payload.prompt,
+                            verifier=verifier, model=verifier_bot.model,
+                        )
+                    except Exception:
+                        return _verification_failure(
+                            accumulated, "Verifikationskontrollen kunne ikke gennemføres.",
+                        )
+
+                verification_task = asyncio.create_task(run_verification())
+                while not verification_task.done():
+                    done, _ = await asyncio.wait(
+                        {verification_task}, timeout=SSE_HEARTBEAT_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if done:
                         break
-                    if lease_lost is not None and lease_lost.is_set():
-                        raise RuntimeError("idempotency lease was lost during AI processing")
-                    accumulated += chunk
-                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                     if await request.is_disconnected():
                         raise asyncio.CancelledError()
-                    now = asyncio.get_event_loop().time()
-                    if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
-                        yield ": keep-alive\n\n"
-                        last_heartbeat = now
-            except asyncio.TimeoutError:
-                raise RuntimeError("provider stream timed out")
-
-            verified = False
-            verification_status = None
-            verification_reason = None
-            if payload.verify:
-                try:
-                    verifier_bot = await _find_verifier_bot(db, bot, org_id)
-                    verifier = await _provider_for_bot(verifier_bot, org_id)
-                    result = await verify_answer(primary_answer=accumulated, original_prompt=payload.prompt,
-                                                 verifier=verifier, model=verifier_bot.model)
-                except Exception:
-                    result = _verification_failure(accumulated, "Verifikationskontrollen kunne ikke gennemføres.")
+                    if lease_lost is not None and lease_lost.is_set():
+                        raise RuntimeError("idempotency lease was lost during verification")
+                    yield ": keep-alive\n\n"
+                result = await verification_task
+                verification_task = None
                 accumulated = result.answer
                 verified = result.verified
                 verification_status = result.status
@@ -430,30 +489,26 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
 
             if lease_lost is not None and lease_lost.is_set():
                 raise RuntimeError("idempotency lease was lost before completion")
-            await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "completed")
-            if idem_key:
-                done_payload = {"role": "assistant", "content": accumulated, "ai_marked": True,
-                                "verified": verified, "verification_status": verification_status,
-                                "verification_reason": verification_reason}
-                if not await idempotency.complete_idempotency(db, request, idem_key, 200,
-                                                              json.dumps(done_payload), lease_token=lease_token):
-                    raise RuntimeError("idempotency lease was lost before completion")
+            await finalizer.finalize(StreamTerminal.COMPLETED, accumulated)
             yield f"data: {json.dumps({'type': 'done', 'full_content': accumulated, 'verified': verified, 'verification_status': verification_status, 'verification_reason': verification_reason})}\n\n"
         except asyncio.CancelledError:
             try:
-                await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "cancelled")
+                await finalizer.finalize(StreamTerminal.CANCELLED, accumulated)
             except Exception:
                 pass
             raise
         except Exception:
             try:
-                await _transition_assistant(db, asst_id, conversation.id, bot.id, accumulated, "failed")
+                await finalizer.finalize(StreamTerminal.FAILED, accumulated)
             except Exception:
                 pass
-            if idem_key:
-                await idempotency.complete_idempotency(db, request, idem_key, 500, "failed", lease_token=lease_token)
             yield f"data: {json.dumps({'type': 'error', 'detail': _sanitize()})}\n\n"
         finally:
+            if verification_task is not None:
+                verification_task.cancel()
+                await asyncio.gather(verification_task, return_exceptions=True)
+            if pump is not None:
+                await pump.aclose()
             await _stop_lease_heartbeat(heartbeat_task, lease_lost)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
