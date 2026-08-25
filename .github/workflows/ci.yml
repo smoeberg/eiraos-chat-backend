@@ -43,6 +43,23 @@ jobs:
           python -m pip install pip-audit
           python -m pip_audit
 
+      - name: Build and verify release image
+        run: |
+          docker build --tag eiraos-ci:${{ github.sha }} .
+          docker run --rm eiraos-ci:${{ github.sha }} \
+            python -c "import eiraos; import eiraos.main"
+          container_id="$(docker run --detach eiraos-ci:${{ github.sha }})"
+          trap 'docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..30}; do
+            if docker exec "$container_id" python -c \
+              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$container_id"
+          exit 1
+
       - name: Verify database migration chain
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/eiraos_test
